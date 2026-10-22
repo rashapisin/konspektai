@@ -14,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      PYTHONUTF8: "1"  # консоль сервера в cp1252: без этого русские сообщения сборки падают
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
