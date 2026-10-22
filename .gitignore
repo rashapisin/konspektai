@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.spec.bak
+/output/
+
+/packaging/sandbox/out/
+
+# личное: рабочий бриф и песочница с путями этого компьютера
+/private/
+/packaging/sandbox/*.wsb

@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest==9.1.1                # MIT: тесты
+pyinstaller==6.22.3          # GPL с исключением для собранных программ: сборка EXE

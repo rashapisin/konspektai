@@ -1,0 +1,11 @@
+# Работа программы
+PySide6-Essentials==6.12.0   # LGPL-3.0: интерфейс и рендер (Qt-библиотеки лежат отдельными DLL)
+pyphen==0.18.1               # LGPL/GPL/MPL на выбор: переносы слов (словари Hunspell)
+python-docx==1.2.0           # MIT: чтение расписаний и планов-конспектов (тянет lxml, BSD)
+opencv-python-headless==5.0.0.93  # Apache-2.0: распознавание образцов почерка по фото
+numpy==2.5.4                 # BSD-3-Clause: обработка изображений
+pypdfium2==5.14.0            # BSD-3-Clause / Apache-2.0: текст и страницы PDF
+rapidocr==3.10.0             # Apache-2.0: распознавание сканов (модели PP-OCRv5, Apache-2.0, в assets/ocr)
+onnxruntime==1.31.0          # MIT: движок для моделей распознавания
+segno==1.6.6                 # BSD-3-Clause: QR-код для отправки фото с телефона
+olefile==0.47                # BSD-2-Clause: чтение старых файлов Word (.doc)
