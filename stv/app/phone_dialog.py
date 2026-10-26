@@ -20,8 +20,8 @@ class PhoneLink(QObject):
     photo = Signal(str)
     next = Signal()
 
-    def __init__(self, title: str, hint: str):
-        super().__init__()
+    def __init__(self, title: str, hint: str, parent=None):
+        super().__init__(parent)  # родитель — мастер: удаляется вместе с ним, а не после выхода из Qt
         self.error = ""
         self.server = None
         try:

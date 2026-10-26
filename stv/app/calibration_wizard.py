@@ -370,26 +370,28 @@ class PhotoStep(QWidget):
             f"• Положите лист на <b>тёмный</b> стол {holes}, напечатанной стороной вверх.<br>"
             "• Снимите <b>сверху</b>, чтобы были видны все 4 угла листа. Свет ровный, без вспышки.<br>"
             "• Или отсканируйте лист <b>с открытой крышкой</b> сканера.", "muted"))
+        # раскладки сначала прикрепляем к странице, потом кладём в них виджеты: иначе PySide считает виджет
+        # своим, Qt удаляет его вместе со страницей, и при выходе из программы он удаляется второй раз
         row = QHBoxLayout()
         row.setSpacing(14)
-        self.drop = DropArea()
-        self.drop.picked.connect(lambda path: self.analyze(path))
+        lay.addLayout(row)
         pc = QVBoxLayout()
         pc.setSpacing(6)
+        row.addLayout(pc, 1)
+        self.drop = DropArea()
+        self.drop.picked.connect(lambda path: self.analyze(path))
         pc.addWidget(_label("<b>С компьютера</b>"))
         pc.addWidget(self.drop, 1)
-        row.addLayout(pc, 1)
         if phone is not None:
             row.addWidget(self._qr_box(phone))
-        lay.addLayout(row)
         row = QHBoxLayout()
+        lay.addLayout(row)
         self.preview = QLabel()
         self.preview.setFixedSize(110, 150)
         self.preview.hide()
         self.status = _label("")
         row.addWidget(self.preview)
         row.addWidget(self.status, 1)
-        lay.addLayout(row)
         lay.addStretch(1)
         QShortcut(QKeySequence.Paste, self, activated=self._paste)
 
@@ -561,7 +563,7 @@ class CalibrationWizard(QDialog):
     def _phone_link(self):
         if self.phone is None:
             from .phone_dialog import PhoneLink
-            self.phone = PhoneLink(f"Калибровка: {self.printer}", "")
+            self.phone = PhoneLink(f"Калибровка: {self.printer}", "", self)
             self.phone.photo.connect(self._phone_photo)
             self.phone.next.connect(self._phone_next)
         return self.phone
@@ -751,10 +753,17 @@ class CalibrationWizard(QDialog):
         if isinstance(w, PhotoStep) and w.result is not None:
             self._next()
 
-    def done(self, r):
+    def _stop_phone(self):
         if self.phone is not None:
             self.phone.stop()  # сервер живёт только пока открыт мастер
+
+    def done(self, r):
+        self._stop_phone()
         super().done(r)
+
+    def closeEvent(self, e):
+        self._stop_phone()  # close() у скрытого окна не вызывает done()
+        super().closeEvent(e)
 
     # --- логика ---
 
