@@ -14,6 +14,8 @@ from pathlib import Path
 from .settings import PrinterOffset
 
 PDF, DIRECT = "pdf", "direct"  # печать через PDF в программе просмотра / прямо из KonspektAI через драйвер
+CHECK_OK_MM = 0.3   # проверка по фото показала промах не больше — печать точная
+CHECK_FAIR_MM = 1.0  # больше — проверку нельзя считать пройденной
 
 
 @dataclass
@@ -31,6 +33,13 @@ class PrinterProfile:
     direct_method: str = ""
     direct_date: str = ""
     direct_check_mm: float = -1.0  # точность по фото проверочного листа, мм; −1 — не проверяли
+    # Принтер печатает на стороне листа, противоположной обычной (у одних лоток спереди, у других сзади
+    # сверху): лист нужно класть другой стороной — отверстиями вправо для лицевой. Узнаём по фото калибровки.
+    flip_feed: bool = False
+
+    def holes_left(self, front: bool) -> bool:
+        """Куда смотрят отверстия, когда человек кладёт лист в лоток для лицевой (front) или оборота."""
+        return front != self.flip_feed
 
     def offsets(self, method: str) -> tuple[PrinterOffset, PrinterOffset]:
         return (self.direct_front, self.direct_back) if method == DIRECT else (self.front, self.back)
@@ -53,9 +62,12 @@ class PrinterProfile:
         if not self.direct_calibrated:
             return "none", "не откалиброван — пройдите мастер калибровки (один лист)"
         when = f" {self.direct_date}" if self.direct_date else ""
-        if self.direct_method == "photo" and self.direct_check_mm >= 0:
-            acc = f"{self.direct_check_mm:.1f}".replace(".", ",")
+        acc = f"{self.direct_check_mm:.1f}".replace(".", ",")
+        if self.direct_method == "photo" and 0 <= self.direct_check_mm <= CHECK_FAIR_MM:
             return "ok", f"✓ откалиброван по фото{when}, проверено: точность {acc} мм"
+        if self.direct_method == "photo" and self.direct_check_mm > CHECK_FAIR_MM:
+            return "warn", (f"откалиброван по фото{when}, но проверка показала расхождение {acc} мм — "
+                            "пройдите проверку ещё раз")
         if self.direct_method == "photo":
             return "warn", f"откалиброван по фото{when}, но проверка не пройдена — проверьте в мастере"
         if self.direct_method == "edit":
@@ -89,7 +101,7 @@ def load() -> dict[str, PrinterProfile]:
                 d.get("calibrated", True),
                 PrinterOffset(**d.get("direct_front", {})), PrinterOffset(**d.get("direct_back", {})),
                 d.get("direct_calibrated", False), d.get("direct_method", ""), d.get("direct_date", ""),
-                float(d.get("direct_check_mm", -1.0)))
+                float(d.get("direct_check_mm", -1.0)), bool(d.get("flip_feed", False)))
     except (OSError, ValueError, KeyError, TypeError):
         pass  # файла нет или он испорчен — работаем со встроенными профилями
     return profiles

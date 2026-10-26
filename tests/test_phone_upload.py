@@ -45,3 +45,29 @@ def test_wrong_token_and_not_image_are_refused(server):
 
 def test_qr_is_png():
     assert qr_png("http://192.168.1.5:1234/abc/")[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_live_state_follows_the_program():
+    """Калибровка: телефон видит, что фото распознаётся, итог и кнопку «Дальше» — без нового QR-кода."""
+    import json
+    got, nexts = [], []
+    s = PhoneUpload(got.append, "Калибровка", "Снимите лист", ip="127.0.0.1", live=True,
+                    on_next=lambda: nexts.append(1))
+    s.start()
+    try:
+        state = lambda: json.loads(urllib.request.urlopen(s.url + "state", timeout=5).read())  # noqa: E731
+        assert state()["stage"] == "wait"
+        assert _post(s.url + "upload", JPEG).status == 200
+        assert state()["stage"] == "busy" and len(got) == 1
+        s.set_state(stage="error", msg="Не нашёл лист на фото")
+        st = state()
+        assert st["stage"] == "error" and "лист" in st["msg"]
+        assert _post(s.url + "upload", JPEG).status == 200  # переснять можно на той же странице
+        s.set_state(stage="ok", msg="✓ Лист распознан", next=True)
+        assert state()["next"] is True
+        assert _post(s.url + "next", b"").status == 200 and nexts == [1]
+        # текст состояния не может закрыть <script> страницы
+        s.set_state(msg="</script><b>")
+        assert "</script><b>" not in urllib.request.urlopen(s.url, timeout=5).read().decode("utf-8")
+    finally:
+        s.stop()

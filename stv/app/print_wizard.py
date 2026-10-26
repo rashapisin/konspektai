@@ -15,7 +15,8 @@ from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QMessageBox, QPus
 from ..engine.layout import Document
 from ..engine.render import export_pdf, split_for_manual_duplex
 from ..engine.settings import PageSettings
-from .calibration_wizard import SheetPicture
+from ..engine import printers
+from .calibration_wizard import GUIDES, SheetPicture, flip_note, holes_word
 from .ui import theme
 from .ui.motion import AnimatedStack
 from .ui.widgets import label
@@ -51,16 +52,19 @@ class PrintWizard(QDialog):
 
         where = f"на принтер <b>{printer_name}</b>" if printer_name else "через PDF"
         two = bool(self.backs)
+        # куда отверстия — по профилю принтера: некоторые принтеры печатают на обратной стороне листа
+        prof = printers.get(printer_name) if printer_name else printers.PrinterProfile("")
         self.stack = AnimatedStack()
         self.stack.addWidget(self._step(
             "Лицевые стороны" + (" · шаг 1 из 2" if two else ""),
-            f"Положите в лоток <b>{sheets} {_sheets_word(sheets)}</b> из блока <b>отверстиями влево</b>, верхом в "
-            f"принтер. Печать пойдёт {where}.", SheetPicture(True), "Печатать лицевые", self._fronts, self.via_pdf))
+            f"Положите в лоток <b>{sheets} {_sheets_word(sheets)}</b> из блока <b>отверстиями "
+            f"{holes_word(prof, True)}</b>, верхом в принтер. Печать пойдёт {where}. {GUIDES}{flip_note(prof)}",
+            SheetPicture(prof.holes_left(True)), "Печатать лицевые", self._fronts, self.via_pdf))
         self.stack.addWidget(self._step(
             "Обороты · шаг 2 из 2",
-            "Когда лицевые напечатаются, переверните пачку <b>как страницу книги</b>: отверстия справа, верх "
-            "остаётся сверху. Порядок листов не меняйте.", SheetPicture(False, flip=True), "Печатать обороты",
-            self._backs, self.reverse))
+            "Когда лицевые напечатаются, переверните пачку <b>как страницу книги</b>: отверстия "
+            f"{'слева' if prof.holes_left(False) else 'справа'}, верх остаётся сверху. Порядок листов не меняйте.",
+            SheetPicture(prof.holes_left(False), flip=True), "Печатать обороты", self._backs, self.reverse))
 
         self.next_btn = QPushButton("Дальше")
         self.next_btn.setProperty("kind", "ghost")

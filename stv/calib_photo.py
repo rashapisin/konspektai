@@ -27,6 +27,10 @@ class PhotoError(Exception):
     pass
 
 
+class WrongSide(PhotoError):
+    """Печать легла не на ту сторону листа: отверстия не с той стороны от надписи."""
+
+
 @dataclass
 class AxisFit:
     off: float        # новая поправка, мм
@@ -73,9 +77,47 @@ def _order(pts: np.ndarray) -> np.ndarray:
     return np.array([pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]], dtype=np.float32)
 
 
+def _line_cross(p1, p2, p3, p4):
+    """Точка пересечения прямых p1p2 и p3p4 или None, если они почти параллельны."""
+    d1, d2 = p2 - p1, p4 - p3
+    den = d1[0] * d2[1] - d1[1] * d2[0]
+    if abs(den) < 1e-9:
+        return None
+    t = ((p3[0] - p1[0]) * d2[1] - (p3[1] - p1[1]) * d2[0]) / den
+    return p1 + t * d1
+
+
+def _enclosing_quad(hull: np.ndarray) -> np.ndarray | None:
+    """Четырёхугольник вокруг выпуклого контура: убираем по одной стороне, продлевая соседние до пересечения,
+    — каждый раз ту, что добавляет меньше всего площади. Срезанный тенью или пальцем угол так
+    восстанавливается: стороны листа продлеваются до настоящего угла."""
+    poly = [p.astype(np.float64) for p in hull.reshape(-1, 2)]
+    if cv2.contourArea(hull.reshape(-1, 1, 2).astype(np.float32), oriented=True) < 0:
+        poly = poly[::-1]
+    while len(poly) > 4:
+        n, best = len(poly), None
+        for i in range(n):
+            a, b, c, d = poly[i - 1], poly[i], poly[(i + 1) % n], poly[(i + 2) % n]
+            q = _line_cross(a, b, c, d)
+            if q is None:
+                continue
+            # q должна лежать снаружи стороны bc (по ту же сторону, что и продолжения ab и dc)
+            if np.dot(q - b, b - a) <= 0 or np.dot(q - c, c - d) <= 0:
+                continue
+            added = abs((c - b)[0] * (q - b)[1] - (c - b)[1] * (q - b)[0]) / 2
+            if best is None or added < best[0]:
+                best = (added, i, q)
+        if best is None:
+            return None
+        _, i, q = best
+        poly[i] = q
+        del poly[(i + 1) % n]
+    return np.array(poly, dtype=np.float32)
+
+
 def find_sheet(img: np.ndarray) -> np.ndarray:
     """Четыре угла листа (ЛВ, ПВ, ПН, ЛН) в координатах фото. Лист светлее фона (стол, ковёр, крышка сканера
-    обычно темнее белой бумаги)."""
+    обычно темнее белой бумаги), а на цветном столе — ещё и бесцветнее его: так находится и угол в тени."""
     h, w = img.shape[:2]
     k = 1200.0 / max(h, w)
     small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else img.copy()
@@ -85,8 +127,13 @@ def find_sheet(img: np.ndarray) -> np.ndarray:
     # бумага: светлая и почти бесцветная (сетка тонкая и после размытия не мешает)
     paper = ((gray > 0) & (hsv[..., 1] < 70)).astype(np.uint8)
     val = cv2.GaussianBlur(gray, (9, 9), 0)
-    _, bright = cv2.threshold(val, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu, bright = cv2.threshold(val, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = (bright & paper).astype(np.uint8) * 255
+    background = hsv[..., 1][mask == 0]
+    if background.size and np.median(background) > 80:
+        # цветной стол (дерево, ткань): бумагу выдаёт бесцветность, а не яркость — лист в тени от руки
+        # или телефона бывает не светлее стола
+        mask = (paper & (val > 0.65 * otsu)).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -96,19 +143,46 @@ def find_sheet(img: np.ndarray) -> np.ndarray:
     if cv2.contourArea(c) < 0.15 * small.shape[0] * small.shape[1]:
         raise PhotoError("Лист на фото слишком маленький или обрезан. Снимите ближе, но чтобы были видны все 4 угла.")
     hull = cv2.convexHull(c)
-    quad = None
-    for eps in (0.01, 0.015, 0.02, 0.03, 0.04):
-        a = cv2.approxPolyDP(hull, eps * cv2.arcLength(hull, True), True)
-        if len(a) == 4:
-            quad = a.reshape(4, 2).astype(np.float32)
-            break
+    quad = _enclosing_quad(cv2.approxPolyDP(hull, 0.004 * cv2.arcLength(hull, True), True))
+    if quad is not None and cv2.contourArea(quad) > 1.15 * cv2.contourArea(hull):
+        quad = None  # контур не похож на четырёхугольник (лист свёрнут, на фото два листа)
+    if quad is None:
+        for eps in (0.01, 0.015, 0.02, 0.03, 0.04):
+            a = cv2.approxPolyDP(hull, eps * cv2.arcLength(hull, True), True)
+            if len(a) == 4:
+                quad = a.reshape(4, 2).astype(np.float32)
+                break
     if quad is None:
         quad = cv2.boxPoints(cv2.minAreaRect(hull)).astype(np.float32)
     return _order(quad) / k
 
 
-def warp_sheet(img: np.ndarray, corners: np.ndarray, paper: PaperProfile, side: Side) -> np.ndarray:
-    """Лист «как сверху», 1 мм = PX пикселей, книжная ориентация, отверстия там, где им положено."""
+def _holes(sheet: np.ndarray) -> tuple[int, int]:
+    """Сколько отверстий видно у левого и у правого края выпрямленного листа.
+
+    Отверстие — тёмное круглое пятно 4–8 мм (в нём виден стол). Тонкие линии убирает «открытие» крупным кругом,
+    а тень от руки или телефона у края — проверка размера и формы: она большая и не круглая."""
+    H, W = sheet.shape[:2]
+    gray = cv2.cvtColor(sheet, cv2.COLOR_BGR2GRAY)
+    dark = (gray < np.median(gray) * 0.7).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(2.5 * PX), int(2.5 * PX)))
+    blobs = cv2.morphologyEx(dark, cv2.MORPH_OPEN, k)
+    n, _, stats, cent = cv2.connectedComponentsWithStats(blobs)
+    left = right = 0
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if not (3 * PX <= w <= 9 * PX and 3 * PX <= h <= 9 * PX and 0.6 <= w / h <= 1.6 and area >= 0.55 * w * h):
+            continue
+        cx = cent[i][0] / PX
+        if cx < 14:
+            left += 1
+        elif cx > W / PX - 14:
+            right += 1
+    return left, right
+
+
+def _warp(img: np.ndarray, corners: np.ndarray, paper: PaperProfile, side: Side) -> tuple[np.ndarray, bool]:
+    """(выпрямленный лист, видны ли отверстия): если видны — лист повёрнут так, что они на своей стороне."""
     tl, tr, br, bl = corners
     if np.linalg.norm(tr - tl) > np.linalg.norm(bl - tl):  # лист лежит боком
         corners = np.array([bl, tl, tr, br], dtype=np.float32)
@@ -116,18 +190,64 @@ def warp_sheet(img: np.ndarray, corners: np.ndarray, paper: PaperProfile, side: 
     dst = np.array([(0, 0), (W - 1, 0), (W - 1, H - 1), (0, H - 1)], dtype=np.float32)
     m = cv2.getPerspectiveTransform(corners.astype(np.float32), dst)
     out = cv2.warpPerspective(img, m, (W, H), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
-    if paper.holes:
-        # отверстия: в них виден фон. Лицевая — слева, оборот — справа; иначе лист снят вверх ногами
-        # тёмные круглые пятна ~5 мм; тонкие линии (сетка, печать) убирает «открытие» крупным кругом
-        gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
-        dark = (gray < np.median(gray) * 0.7).astype(np.uint8)
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(2.5 * PX), int(2.5 * PX)))
-        blobs = cv2.morphologyEx(dark, cv2.MORPH_OPEN, k)
-        strip = int(12 * PX)
-        left, right = blobs[:, :strip].mean(), blobs[:, W - strip:].mean()
-        if max(left, right) > 0.002 and (left > right) != (side is Side.FRONT):
-            out = cv2.rotate(out, cv2.ROTATE_180)
-    return out
+    if not paper.holes:
+        return out, False
+    # Лицевая — отверстия слева, оборот — справа; иначе лист снят вверх ногами
+    left, right = _holes(out)
+    if max(left, right) < 2 or min(left, right) > 0:
+        return out, False  # не разглядел: ориентацию определит надпись на листе
+    if (left > right) != (side is Side.FRONT):
+        out = cv2.rotate(out, cv2.ROTATE_180)
+    return out, True
+
+
+def warp_sheet(img: np.ndarray, corners: np.ndarray, paper: PaperProfile, side: Side) -> np.ndarray:
+    """Лист «как сверху», 1 мм = PX пикселей, книжная ориентация, отверстия там, где им положено."""
+    return _warp(img, corners, paper, side)[0]
+
+
+def _title_side(black: np.ndarray) -> str | None:
+    """Где на листе надпись «KonspektAI · …»: «top» — над рисунком, как напечатано, «bottom» — под ним
+    (лист перевёрнут), None — не нашлась.
+
+    По строкам листа: рисунок из линий — одна длинная полоса строк с чернилами, надпись — короткая полоса
+    отдельно от него. Если принтер сильно сдвинул печать, надпись может уйти за край — тогда None."""
+    H, W = black.shape
+    e = int(14 * PX)
+    rows = black[:, e:W - e].sum(axis=1)
+    rows[:int(2 * PX)] = 0
+    rows[H - int(2 * PX):] = 0
+    ink = rows > max(1.5 * PX, 0.02 * rows.max())
+    runs, start, gap = [], None, 0
+    for i, v in enumerate(ink):  # полосы строк с чернилами; просветы до 2 мм (пунктир, буквы) не делят полосу
+        if v:
+            if start is None:
+                start = i
+            gap, end = 0, i
+        elif start is not None:
+            gap += 1
+            if gap > 2 * PX:
+                runs.append((start, end))
+                start = None
+    if start is not None:
+        runs.append((start, end))
+    if not runs:
+        return None
+    main = max(runs, key=lambda r: r[1] - r[0])
+    if main[1] - main[0] < 60 * PX:
+        return None
+    def text_like(r):  # надпись — буквы с просветами посередине; полоса стола или тени у края — во всю ширину
+        cols = black[r[0]:r[1] + 1, e:W - e].sum(axis=0) > 0.3
+        return 0.05 < cols.mean() < 0.8
+
+    small = [r for r in runs if r is not main and 1 * PX <= r[1] - r[0] <= 6 * PX and text_like(r)]
+    above = [r for r in small if main[0] - r[1] <= 20 * PX and r[1] < main[0]]
+    below = [r for r in small if r[0] - main[1] <= 20 * PX and r[0] > main[1]]
+    if above and not below:
+        return "top"
+    if below and not above:
+        return "bottom"
+    return None
 
 
 # ---------- линии ----------
@@ -297,13 +417,25 @@ def combine(front: "PhotoResult", back: "PhotoResult") -> tuple[PrinterOffset, P
 SKEW_WARN_MM = 1.0  # лист заметно пошёл наискосок
 
 
+def _wrong_side_text(side: Side) -> str:
+    want, got = ("слева", "справа") if side is Side.FRONT else ("справа", "слева")
+    name = "Лицевая" if side is Side.FRONT else "Оборот"
+    return (f"{name} напечатан{'а' if side is Side.FRONT else ''} не на той стороне листа: если держать лист "
+            f"надписью вверх, отверстия {got}, а должны быть {want}.")
+
+
 def measure(path, paper: PaperProfile, side: Side, current: PrinterOffset,
             drawn_x: list[float], drawn_y: list[float]) -> PhotoResult:
     """Поправки по фото листа, на котором чёрные линии нарисованы в drawn_x (вертикальные) и drawn_y
     (горизонтальные), в координатах профиля, с текущими поправками current."""
     img = imread(path)
-    sheet = warp_sheet(img, find_sheet(img), paper, side)
+    sheet, holes_seen = _warp(img, find_sheet(img), paper, side)
     blue, black = _masks(sheet)
+    if _title_side(black) == "bottom":
+        if holes_seen:
+            raise WrongSide(_wrong_side_text(side))
+        sheet = cv2.rotate(sheet, cv2.ROTATE_180)  # отверстий не видно, а надпись внизу — снято вверх ногами
+        blue, black = _masks(sheet)
     H, W = blue.shape
     e = int(EDGE_MM * PX)
     inner = np.zeros_like(blue)

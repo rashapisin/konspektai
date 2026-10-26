@@ -6,6 +6,7 @@
 В обоих случаях знак и миллиметры считает программа: люди часто сдвигают в обратную сторону.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -209,16 +210,19 @@ class _Measure(QThread):
     """Распознавание фото в фоне: большой снимок обрабатывается секунду-две, окно не должно замирать."""
     done = Signal(object)
     failed = Signal(str)
+    wrong_side = Signal(str)
 
     def __init__(self, path: str, ps: PageSettings, side: Side, check: bool):
         super().__init__()
         self.path, self.ps, self.side, self.check = path, ps, side, check
 
     def run(self):
-        from ..calib_photo import PhotoError, measure
+        from ..calib_photo import PhotoError, WrongSide, measure
         xs, ys = (check_lines if self.check else photo_lines)(self.ps.paper, self.side)
         try:
             self.done.emit(measure(self.path, self.ps.paper, self.side, self.ps.offset(self.side), xs, ys))
+        except WrongSide as e:
+            self.wrong_side.emit(str(e))
         except PhotoError as e:
             self.failed.emit(str(e))
         except Exception as e:  # неожиданное — тоже показать, а не упасть
@@ -311,39 +315,73 @@ def _fix_words(dx: float, dy: float) -> str:
     return "печать пойдёт " + " и ".join(parts)
 
 
-CHECK_OK_MM = 0.3  # на проверочном листе промах не больше — калибровка удалась
-MAX_CHECKS = 2      # больше двух проверок не нужно: вторая уже доводит поправки до точности фото
+MAX_CHECKS = 2      # после второй проверки небольшой остаток доводим без третьего листа
+BIG_SHIFT_MM = 8.0  # печать ушла дальше — лист, скорее всего, лежал в лотке не вплотную к направляющим
+SIDES_APART_MM = 6.0  # лицевая и оборот ушли вбок по-разному — лист ложится в лоток каждый раз иначе
 
 
 def _miss(res) -> float:
     return max(abs(res.x.shift_mm), abs(res.y.shift_mm))
 
 
-class PhotoStep(QWidget):
-    """«Сфотографируйте лист» → распознавание → короткий итог и картинка того, что нашлось."""
+def _plain(html: str) -> str:
+    """Текст для телефона: без разметки."""
+    return re.sub(r"\s+", " ", re.sub(r"<br\s*/?>", " ", re.sub(r"<(?!br)[^>]+>", "", html))).strip()
 
-    def __init__(self, side: Side, page_settings, on_change, check: bool = False):
+
+def holes_word(profile: printers.PrinterProfile, front: bool) -> str:
+    """«влево» или «вправо»: как класть лист в лоток этого принтера для лицевой (front) или оборота."""
+    return "влево" if profile.holes_left(front) else "вправо"
+
+
+GUIDES = ("<b>Придвиньте направляющие лотка вплотную к листу</b> — иначе узкий лист ложится то левее, то правее, "
+          "и строки уезжают.")
+
+
+def flip_note(profile: printers.PrinterProfile) -> str:
+    if not profile.flip_feed:
+        return ""
+    return ("<br><span style='color:%s'>Этот принтер печатает на обратной стороне листа, поэтому отверстия — "
+            "в другую сторону. Программа узнала это по фото.</span>" % theme.current().text_muted)
+
+
+class PhotoStep(QWidget):
+    """«Сфотографируйте лист» → распознавание → короткий итог и картинка того, что нашлось.
+
+    Фото — с компьютера (файл, перетаскивание, Ctrl+V) или с телефона по QR-коду: код показан сразу, рядом.
+    Что происходит, видно и на телефоне: распознаю → «Дальше» или «Переснять»."""
+
+    def __init__(self, side: Side, page_settings, on_change, check: bool = False, phone=None):
         super().__init__()
         self.side, self.page_settings, self.on_change, self.check = side, page_settings, on_change, check
         self.result = None
         self.worker = None
+        self.on_wrong_side = None  # мастер подскажет, как положить лист, и запомнит это для принтера
         name = "лицевую сторону" if side is Side.FRONT else "оборот"
         holes = "отверстиями влево" if side is Side.FRONT else "отверстиями вправо"
+        self.phone_title = f"Сфотографируйте {'проверку: ' if check else ''}{name}"
+        self.phone_hint = (f"Положите лист на тёмный стол {holes}, напечатанной стороной вверх, и снимите сверху "
+                           "так, чтобы были видны все 4 угла.")
+        self.phone_stage, self.phone_msg = "wait", ""
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
-        lay.addWidget(_label(f"Сфотографируйте {'проверку: ' if check else ''}{name}", "h2"))
+        lay.addWidget(_label(self.phone_title, "h2"))
         lay.addWidget(_label(
             f"• Положите лист на <b>тёмный</b> стол {holes}, напечатанной стороной вверх.<br>"
             "• Снимите <b>сверху</b>, чтобы были видны все 4 угла листа. Свет ровный, без вспышки.<br>"
-            "• Или отсканируйте лист <b>с открытой крышкой</b> сканера.<br>"
-            "Фото с телефона перекиньте на компьютер любым удобным способом.", "muted"))
+            "• Или отсканируйте лист <b>с открытой крышкой</b> сканера.", "muted"))
+        row = QHBoxLayout()
+        row.setSpacing(14)
         self.drop = DropArea()
         self.drop.picked.connect(lambda path: self.analyze(path))
-        lay.addWidget(self.drop)
-        phone = QPushButton("Сфотографировать телефоном по QR-коду")
-        phone.setIcon(theme.icon("smartphone", theme.current().text, 18))
-        phone.clicked.connect(self._from_phone)
-        lay.addWidget(phone, 0, Qt.AlignLeft)
+        pc = QVBoxLayout()
+        pc.setSpacing(6)
+        pc.addWidget(_label("<b>С компьютера</b>"))
+        pc.addWidget(self.drop, 1)
+        row.addLayout(pc, 1)
+        if phone is not None:
+            row.addWidget(self._qr_box(phone))
+        lay.addLayout(row)
         row = QHBoxLayout()
         self.preview = QLabel()
         self.preview.setFixedSize(110, 150)
@@ -355,14 +393,27 @@ class PhotoStep(QWidget):
         lay.addStretch(1)
         QShortcut(QKeySequence.Paste, self, activated=self._paste)
 
-    def _from_phone(self):
-        from .phone_dialog import ask_photos
-        side = "лицевую сторону" if self.side is Side.FRONT else "оборот"
-        paths = ask_photos(self, f"Калибровка: {side}",
-                           "Положите лист на тёмный стол напечатанной стороной вверх и снимите сверху так, "
-                           "чтобы были видны все 4 угла.")
-        if paths:
-            self.analyze(paths[0], "фото с телефона")
+    @staticmethod
+    def _qr_box(phone) -> QWidget:
+        box = QWidget()
+        box.setFixedWidth(230)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addWidget(_label("<b>С телефона</b>"))
+        if phone.error:
+            v.addWidget(_label(f"QR-код недоступен: {phone.error}", "muted"))
+        else:
+            qr = QLabel()
+            qr.setPixmap(phone.qr())
+            qr.setAlignment(Qt.AlignCenter)
+            qr.setStyleSheet("background: white; border-radius: 12px; padding: 6px;")
+            v.addWidget(qr, 0, Qt.AlignLeft)
+            v.addWidget(_label("Наведите камеру телефона на код — фото придёт сюда. Код один на всю калибровку. "
+                               "Телефон и компьютер — в одной сети Wi-Fi. Если Windows спросит про доступ к сети, "
+                               "нажмите «Разрешить».", "muted"))
+        v.addStretch(1)
+        return box
 
     def _paste(self):
         img = QApplication.clipboard().image()
@@ -379,7 +430,6 @@ class PhotoStep(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
         self.result = None
-        self.on_change()
         # сразу показать, что фото принято: миниатюра и имя файла
         pm = QPixmap(path)
         if not pm.isNull():
@@ -387,13 +437,21 @@ class PhotoStep(QWidget):
             self.preview.show()
         self.drop.setText(f"Добавлено: {name or Path(path).name}\nНажмите, чтобы выбрать другое фото.")
         self.status.setText("Распознаю лист и линии…")
+        self.phone_stage, self.phone_msg = "busy", "Фото получено, распознаю…"
+        self.on_change()
         self.worker = _Measure(path, self.page_settings(), self.side, self.check)
         self.worker.done.connect(self._done)
         self.worker.failed.connect(self._failed)
+        self.worker.wrong_side.connect(self._wrong_side)
         self.worker.start()
 
     def _failed(self, msg: str):
         self.status.setText(f"<span style='color:{theme.current().danger}'>{msg}</span>")
+        self.phone_stage, self.phone_msg = "error", _plain(msg)
+        self.on_change()
+
+    def _wrong_side(self, msg: str):
+        self._failed(msg + (" " + self.on_wrong_side(self) if self.on_wrong_side else ""))
 
     def _done(self, res):
         self.result = res
@@ -405,14 +463,16 @@ class PhotoStep(QWidget):
         p = theme.current()
         if self.check:
             m = _miss(res)
-            verdict = (f"<b style='color:{p.success}'>✓ Отлично: расхождение {_mm(m)} мм</b>" if m <= CHECK_OK_MM
+            verdict = (f"<b style='color:{p.success}'>✓ Отлично: расхождение {_mm(m)} мм</b>"
+                       if m <= printers.CHECK_OK_MM
                        else f"<b style='color:{p.warning}'>Расхождение {_mm(m)} мм — уточню поправки</b>")
-            self.status.setText(verdict + _skew_words(res))
+            text = verdict + _skew_words(res)
         else:
-            self.status.setText(f"<b style='color:{p.success}'>✓ Лист распознан</b> "
-                                f"(линий: {res.x.lines} и {res.y.lines}).<br>"
-                                f"{_miss_words(res.x.shift_mm, res.y.shift_mm)}" + _skew_words(res))
+            text = (f"<b style='color:{p.success}'>✓ Лист распознан</b> (линий: {res.x.lines} и {res.y.lines}).<br>"
+                    f"{_miss_words(res.x.shift_mm, res.y.shift_mm)}" + _skew_words(res))
+        self.status.setText(text)
         fade_in(self.status, rise=6)
+        self.phone_stage, self.phone_msg = "ok", _plain(text) + " Нажмите «Дальше» — здесь или на компьютере."
         self.on_change()
 
 
@@ -421,12 +481,13 @@ class CalibrationWizard(QDialog):
 
     Калибровка: лист с линиями → фото обеих сторон → поправки сохранены. Проверка (по желанию, но мастер
     её предлагает): новый лист с сеткой по клетке → фото обеих сторон → «всё точно» или поправки уточняются
-    и можно проверить ещё раз. Точность проверки записывается в профиль принтера."""
+    и можно проверить ещё раз. Точность проверки записывается в профиль принтера.
+    verify=True — сразу к проверке: принтер уже откалиброван, проверку отложили или она не прошла."""
 
-    def __init__(self, printer_name: str, parent=None):
+    def __init__(self, printer_name: str, parent=None, verify: bool = False):
         super().__init__(parent)
-        self.setWindowTitle(f"Калибровка: {printer_name}")
-        self.resize(780, 680)
+        self.setWindowTitle(f"{'Проверка' if verify else 'Калибровка'}: {printer_name}")
+        self.resize(820, 700)
         self.printer = printer_name
         self.profiles = printers.load()
         self.profile = self.profiles.setdefault(printer_name, printers.PrinterProfile(printer_name))
@@ -442,6 +503,8 @@ class CalibrationWizard(QDialog):
         self.verify_from = None  # с какой страницы начинается проверка
         self.checks_done = 0
         self.verdict_page = None
+        self.phone = None  # телефон по QR-коду: один на весь мастер
+        self.load_views = []  # подсказки «как положить лист» — меняются, если принтер печатает на обороте
 
         self.stack = AnimatedStack()
         self.pages: list[QWidget] = [self._choose_page()]
@@ -465,7 +528,12 @@ class CalibrationWizard(QDialog):
         lay.setContentsMargins(28, 24, 28, 20)
         lay.addWidget(self.stack, 1)
         lay.addLayout(nav)
-        self._go(0)
+        if verify:
+            self.mode = "photo"
+            self.saved = True
+            self._start_verify()
+        else:
+            self._go(0)
 
     # --- страницы ---
 
@@ -480,8 +548,8 @@ class CalibrationWizard(QDialog):
         lay.addSpacing(8)
         for key, icon, title, sub in (
                 ("photo", "file-image", "По фото — точнее всего (рекомендуем)",
-                 "Напечатаете лист, сфотографируете телефоном или отсканируете — программа всё измерит сама "
-                 "до десятых миллиметра."),
+                 "Напечатаете лист, сфотографируете телефоном по QR-коду или отсканируете — программа всё "
+                 "измерит сама до десятых миллиметра."),
                 ("manual", "sliders-horizontal", "Вручную, без фото",
                  "Посмотрите на шкалы на листе и нажмёте номера рисок. Быстро, но на глаз легко ошибиться.")):
             card = OptionCard(key, icon, title, sub)
@@ -490,19 +558,38 @@ class CalibrationWizard(QDialog):
         lay.addStretch(1)
         return w
 
+    def _phone_link(self):
+        if self.phone is None:
+            from .phone_dialog import PhoneLink
+            self.phone = PhoneLink(f"Калибровка: {self.printer}", "")
+            self.phone.photo.connect(self._phone_photo)
+            self.phone.next.connect(self._phone_next)
+        return self.phone
+
+    def _photo_step(self, side: Side, check: bool) -> PhotoStep:
+        step = PhotoStep(side, self._page, self._sync, check=check, phone=self._phone_link())
+        step.on_wrong_side = self._wrong_side
+        return step
+
+    def _front_text(self, what: str, extra: str = "") -> str:
+        return (f"Положите в лоток {what} из блока <b>отверстиями {holes_word(self.profile, True)}</b>, верхом в "
+                f"принтер{extra}. {GUIDES}{flip_note(self.profile)}")
+
+    def _back_text(self) -> str:
+        return ("Возьмите этот же лист и переверните его <b>как страницу книги</b>: отверстия теперь "
+                f"<b>{'слева' if self.profile.holes_left(False) else 'справа'}</b>, верх остаётся верхом. "
+                "Положите в лоток так же и придвиньте направляющие.")
+
     def _start(self, mode: str):
         self.mode = mode
+        self.verify_from, self.checks_done, self.load_views = None, 0, []
         self._truncate(1)
-        front = self._print_page("Лицевая сторона",
-                                 "Положите в лоток ручной подачи <b>один</b> лист из блока <b>отверстиями влево</b>, "
-                                 "верхом в принтер — так же, как будете печатать конспекты.",
-                                 SheetPicture(True), "Напечатать лицевую", Side.FRONT)
-        back = self._print_page("Оборот",
-                                "Возьмите этот же лист и переверните его <b>как страницу книги</b>: отверстия теперь "
-                                "справа, верх остаётся верхом. Положите в лоток так же.",
-                                SheetPicture(False, flip=True), "Напечатать оборот", Side.BACK)
+        front = self._print_page(
+            "Лицевая сторона", lambda: self._front_text("<b>один</b> лист", " — так же, как будете печатать конспекты"),
+            True, "Напечатать лицевую", Side.FRONT)
+        back = self._print_page("Оборот", self._back_text, False, "Напечатать оборот", Side.BACK)
         if mode == "photo":
-            self.photos = {s: PhotoStep(s, self._page, self._sync) for s in (Side.FRONT, Side.BACK)}
+            self.photos = {s: self._photo_step(s, False) for s in (Side.FRONT, Side.BACK)}
             middle_f, middle_b = [self.photos[Side.FRONT]], [self.photos[Side.BACK]]
         else:
             self.qs = {
@@ -534,14 +621,17 @@ class CalibrationWizard(QDialog):
             self.pages.append(w)
             self.stack.addWidget(w)
 
-    def _print_page(self, title: str, html: str, picture: QWidget, button: str, side: Side,
-                    check: bool = False) -> QWidget:
+    def _print_page(self, title: str, html, front: bool, button: str, side: Side, check: bool = False) -> QWidget:
+        """html — функция: текст подсказки зависит от того, какой стороной этот принтер печатает."""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(12)
         lay.addWidget(_label(title, "h2"))
-        lay.addWidget(_label(html))
+        text = _label(html())
+        lay.addWidget(text)
+        picture = SheetPicture(self.profile.holes_left(front), flip=not front)
         lay.addWidget(picture, 1)
+        self.load_views.append((w, text, picture, html, front))
         b = QPushButton(button)
         b.setProperty("kind", "primary")
         b.setIcon(theme.icon("printer", theme.current().accent_text, 18))
@@ -550,7 +640,34 @@ class CalibrationWizard(QDialog):
         done = _label("Уже напечатали? Нажмите «Дальше».", "muted")
         done.setWordWrap(False)
         lay.addWidget(done, 0, Qt.AlignHCenter)
+        w.phone_text = (f"Напечатайте лист: на компьютере кнопка «{button}». Когда напечатается — нажмите там "
+                        "«Дальше», и здесь появится кнопка для фото.")
         return w
+
+    def _refresh_load(self):
+        for _, text, picture, html, front in self.load_views:
+            text.setText(html())
+            picture.holes_left = self.profile.holes_left(front)
+            picture.update()
+
+    def _wrong_side(self, step: PhotoStep) -> str:
+        """Печать легла не на ту сторону. Если это лицевая и правильной лицевой ещё не было — значит, этот
+        принтер печатает на другой стороне листа: запоминаем и меняем подсказки."""
+        if step.side is Side.BACK:
+            return ("Нажмите «Назад», переверните лист как страницу книги и напечатайте оборот снова. Если "
+                    "обратная сторона уже занята — возьмите новый лист и начните с лицевой.")
+        known = any(st.result is not None for st in (self.photos.get(Side.FRONT), self.checks.get(Side.FRONT))
+                    if st is not None)
+        if known:
+            return "Нажмите «Назад» и напечатайте на новом листе, положив его так, как в подсказке."
+        self.profile.flip_feed = not self.profile.flip_feed
+        try:
+            printers.save(self.profiles)
+        except OSError:
+            pass  # подсказка всё равно поменяется в этом мастере
+        self._refresh_load()
+        return (f"Запомнил: в этот принтер лист нужно класть <b>отверстиями {holes_word(self.profile, True)}</b>. "
+                "Нажмите «Назад» и напечатайте лицевую на новом листе — подсказка уже исправлена.")
 
     def _result_page(self) -> QWidget:
         w = QWidget()
@@ -569,6 +686,7 @@ class CalibrationWizard(QDialog):
         chk.clicked.connect(self._start_verify)
         lay.addWidget(chk, 0, Qt.AlignLeft)
         lay.addStretch(1)
+        w.phone_text = "Поправки сохранены. Теперь проверка: на компьютере нажмите «Проверить по фото»."
         return w
 
     def _start_verify(self):
@@ -576,15 +694,14 @@ class CalibrationWizard(QDialog):
         if self.verify_from is None:
             self.verify_from = len(self.pages)
         self._truncate(self.verify_from)
-        self.checks = {s: PhotoStep(s, self._page, self._sync, check=True) for s in (Side.FRONT, Side.BACK)}
+        self.load_views = [v for v in self.load_views if v[0] in self.pages]  # страницы проверки — заново
+        self.checks = {s: self._photo_step(s, True) for s in (Side.FRONT, Side.BACK)}
         front = self._print_page("Проверка: лицевая сторона",
-                                 "Положите <b>новый</b> лист из блока <b>отверстиями влево</b>. Принтер напечатает "
-                                 "пунктирную сетку прямо по синей клетке.", SheetPicture(True),
-                                 "Напечатать проверку", Side.FRONT, check=True)
-        back = self._print_page("Проверка: оборот",
-                                "Переверните этот лист <b>как страницу книги</b> — отверстия справа.",
-                                SheetPicture(False, flip=True), "Напечатать проверку оборота", Side.BACK,
-                                check=True)
+                                 lambda: self._front_text("<b>новый</b> лист", ". Принтер напечатает пунктирную сетку "
+                                                          "прямо по синей клетке"),
+                                 True, "Напечатать проверку", Side.FRONT, check=True)
+        back = self._print_page("Проверка: оборот", self._back_text, False, "Напечатать проверку оборота",
+                                Side.BACK, check=True)
         self.verdict_page = self._verdict_page()
         self._append([front, self.checks[Side.FRONT], back, self.checks[Side.BACK], self.verdict_page])
         self._go(self.verify_from)
@@ -597,13 +714,47 @@ class CalibrationWizard(QDialog):
         self.verdict = _label("")
         lay.addWidget(self.verdict_title)
         lay.addWidget(self.verdict)
-        self.again = QPushButton("Проверить ещё раз (последний)")
+        self.again = QPushButton("Проверить ещё раз")
         self.again.setProperty("kind", "primary")
         self.again.setIcon(theme.icon("refresh-cw", theme.current().accent_text, 18))
         self.again.clicked.connect(self._start_verify)
         lay.addWidget(self.again, 0, Qt.AlignLeft)
         lay.addStretch(1)
         return w
+
+    # --- телефон ---
+
+    def _phone_sync(self):
+        """Телефон показывает то же, что мастер: на шаге с фото — кнопку и итог распознавания, иначе — что
+        сделать на компьютере."""
+        if self.phone is None:
+            return
+        w = self.stack.currentWidget()
+        if isinstance(w, PhotoStep):
+            self.phone.set_state(stage=w.phone_stage, title=w.phone_title, hint=w.phone_hint, msg=w.phone_msg,
+                                 next=True)
+        elif w is self.verdict_page and w is not None:
+            self.phone.set_state(stage="idle", title=self.verdict_title.text(), hint="",
+                                 msg=_plain(self.verdict.text()), next=False)
+        else:
+            self.phone.set_state(stage="idle", title=f"Калибровка: {self.printer}", hint="",
+                                 msg=getattr(w, "phone_text", "Продолжайте на компьютере. Когда понадобится фото, "
+                                                              "кнопка появится здесь сама."), next=False)
+
+    def _phone_photo(self, path: str):
+        w = self.stack.currentWidget()
+        if isinstance(w, PhotoStep):
+            w.analyze(path, "фото с телефона")
+
+    def _phone_next(self):
+        w = self.stack.currentWidget()
+        if isinstance(w, PhotoStep) and w.result is not None:
+            self._next()
+
+    def done(self, r):
+        if self.phone is not None:
+            self.phone.stop()  # сервер живёт только пока открыт мастер
+        super().done(r)
 
     # --- логика ---
 
@@ -613,6 +764,7 @@ class CalibrationWizard(QDialog):
             self.next_btn.setEnabled(q.answer is not None)
         elif isinstance(q, PhotoStep):
             self.next_btn.setEnabled(q.result is not None)
+        self._phone_sync()
 
     def _next(self):
         w = self.stack.currentWidget()
@@ -653,8 +805,8 @@ class CalibrationWizard(QDialog):
             return
         self._go(self.stack.currentIndex() + 1)
 
-    def _store(self, check_mm: float = -1.0) -> bool:
-        self.profile.set_offsets(printers.DIRECT, self.front, self.back, how=self.mode, check_mm=check_mm)
+    def _store(self, check_mm: float = -1.0, how: str | None = None) -> bool:
+        self.profile.set_offsets(printers.DIRECT, self.front, self.back, how=how or self.mode, check_mm=check_mm)
         try:
             printers.save(self.profiles)
         except OSError as e:
@@ -670,7 +822,8 @@ class CalibrationWizard(QDialog):
             from ..calib_photo import combine
             self.front, self.back = combine(rf, rb)
             text = (f"<b>Лицевая сторона:</b> {_miss_words(rf.x.shift_mm, rf.y.shift_mm)}<br>"
-                    f"<b>Оборот:</b> {_miss_words(rb.x.shift_mm, rb.y.shift_mm)}{_scale_words(self.front)}")
+                    f"<b>Оборот:</b> {_miss_words(rb.x.shift_mm, rb.y.shift_mm)}{_scale_words(self.front)}"
+                    f"{_placement_words(rf, rb)}")
         else:
             d = {k: q.answer or 0.0 for k, q in self.qs.items()}
             self.front = PrinterOffset(round(self.front.dx_mm + d["fx"], 2), round(self.front.dy_mm + d["fy"], 2),
@@ -686,42 +839,61 @@ class CalibrationWizard(QDialog):
         return True
 
     def _verdict(self):
+        """Итог проверки. «Завершена» — только если печать и правда легла в клетку: промах до CHECK_OK_MM,
+        или после второй проверки небольшой остаток, который доводим по ней. Большой промах на проверке
+        после калибровки — не ошибка измерения, а лист, который каждый раз ложится в лоток по-разному:
+        это честно говорим и предлагаем проверить ещё раз."""
         rf, rb = self.checks[Side.FRONT].result, self.checks[Side.BACK].result
         if rf is None or rb is None:
             return
         self.checks_done += 1
         miss = max(_miss(rf), _miss(rb))
         p = theme.current()
-        if miss > CHECK_OK_MM and self.checks_done >= MAX_CHECKS:
-            # вторая проверка: доводим поправки по ней и заканчиваем — третий лист не нужен
-            from ..calib_photo import combine
-            self.front, self.back = combine(rf, rb)
-            self._store(check_mm=miss)
-            self.verdict_title.setText("✓ Калибровка завершена")
-            self.verdict.setText(
-                f"Довёл поправки по второй проверке (было расхождение {_mm(miss)} мм).<br>"
-                f"<b>Лицевая:</b> {_miss_words(rf.x.shift_mm, rf.y.shift_mm)}<br>"
-                f"<b>Оборот:</b> {_miss_words(rb.x.shift_mm, rb.y.shift_mm)}<br><br>"
-                "Можно печатать конспекты.")
-            self.verdict_title.setStyleSheet(f"color: {p.success};")
-            self.again.hide()
-            return
-        if miss <= CHECK_OK_MM:
-            self._store(check_mm=miss)
+        sides = (f"<b>Лицевая:</b> {_miss_words(rf.x.shift_mm, rf.y.shift_mm)}<br>"
+                 f"<b>Оборот:</b> {_miss_words(rb.x.shift_mm, rb.y.shift_mm)}<br><br>")
+        if miss <= printers.CHECK_OK_MM:
+            self._store(check_mm=miss, how="photo")
             self.verdict_title.setText("✓ Калибровка завершена")
             self.verdict.setText(f"Печать ложится в клетку с точностью <b>{_mm(miss)} мм</b> на обеих сторонах. "
                                  "Можно печатать конспекты.")
             self.verdict_title.setStyleSheet(f"color: {p.success};")
             self.again.hide()
-        else:
-            from ..calib_photo import combine
-            self.front, self.back = combine(rf, rb)  # проверочный лист тоже даёт поправки — доводим
-            self._store()
+            return
+        from ..calib_photo import combine
+        self.front, self.back = combine(rf, rb)  # проверочный лист тоже даёт поправки — доводим
+        if miss <= printers.CHECK_FAIR_MM and self.checks_done >= MAX_CHECKS:
+            # вторая проверка: остаток небольшой — доводим поправки по ней, третий лист не нужен
+            self._store(check_mm=miss, how="photo")
+            self.verdict_title.setText("✓ Калибровка завершена")
+            self.verdict.setText(f"Довёл поправки по второй проверке (было расхождение {_mm(miss)} мм).<br>"
+                                 + sides + "Можно печатать конспекты.")
+            self.verdict_title.setStyleSheet(f"color: {p.success};")
+            self.again.hide()
+            return
+        self._store(how="photo")  # поправки уточнены, но не проверены
+        self.verdict_title.setStyleSheet(f"color: {p.warning};")
+        self.again.show()
+        if miss <= printers.CHECK_FAIR_MM:
             self.verdict_title.setText("Почти: уточнил поправки")
-            self.verdict.setText(
-                f"<b>Лицевая:</b> {_miss_words(rf.x.shift_mm, rf.y.shift_mm)}<br>"
-                f"<b>Оборот:</b> {_miss_words(rb.x.shift_mm, rb.y.shift_mm)}<br><br>"
-                "Проверим ещё раз на новом листе — это последняя проверка, после неё поправки "
-                "будут доведены окончательно.")
-            self.verdict_title.setStyleSheet(f"color: {p.warning};")
-            self.again.show()
+            self.verdict.setText(sides + "Проверим ещё раз на новом листе — после второй проверки поправки будут "
+                                         "доведены окончательно.")
+            return
+        self.verdict_title.setText(f"Расхождение {_mm(miss)} мм — проверку не прошли")
+        self.verdict.setText(
+            sides + "Это намного больше, чем ошибка измерения: печать после калибровки должна ложиться точно. "
+            "Так бывает, когда лист каждый раз ложится в лоток по-разному. " + GUIDES + " Поправки по этой "
+            "проверке я уточнил — проверьте ещё раз на новом листе, положив его так же плотно.")
+
+
+def _placement_words(rf, rb) -> str:
+    """Предупреждение, если печать ушла очень далеко или по-разному на двух сторонах: обычно это лист, который
+    лежал в лотке не вплотную к направляющим. Поправку такая калибровка даёт, но повторится ли сдвиг — неизвестно."""
+    far = max(_miss(rf), _miss(rb)) > BIG_SHIFT_MM
+    apart = abs(rf.x.shift_mm - rb.x.shift_mm) > SIDES_APART_MM
+    if not (far or apart):
+        return ""
+    p = theme.current()
+    return (f"<br><br><b style='color:{p.warning}'>Печать ушла далеко от клетки</b>"
+            f"{' и по-разному на двух сторонах' if apart else ''}. Обычно так бывает, если узкий лист лежал в "
+            "широком лотке не вплотную к направляющим и сдвинулся вбок — в следующий раз он может лечь иначе. "
+            f"{GUIDES} И обязательно пройдите проверку: она покажет, повторяется ли сдвиг.")

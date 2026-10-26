@@ -1,4 +1,5 @@
-"""Окно «С телефона»: QR-код, подсказка и счётчик пришедших фото."""
+"""Окно «С телефона»: QR-код, подсказка и счётчик пришедших фото. PhoneLink — то же без окна, для мастеров,
+которые показывают QR-код у себя на странице."""
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QPixmap
@@ -11,6 +12,42 @@ from .ui.widgets import label
 class _Bridge(QObject):
     """Фото приходит в потоке сервера — в интерфейс передаём сигналом."""
     photo = Signal(str)
+
+
+class PhoneLink(QObject):
+    """Телефон на всё время мастера: один QR-код, сервер живёт, пока открыт мастер. Что показать на телефоне,
+    мастер задаёт через set_state; фото и нажатие «Дальше» на телефоне приходят сигналами."""
+    photo = Signal(str)
+    next = Signal()
+
+    def __init__(self, title: str, hint: str):
+        super().__init__()
+        self.error = ""
+        self.server = None
+        try:
+            self.server = PhoneUpload(self.photo.emit, title, hint, live=True, on_next=self.next.emit)
+            self.server.start()
+        except (UploadError, OSError) as e:
+            self.error = str(e)
+
+    def qr(self) -> QPixmap:
+        pm = QPixmap()
+        if self.server:
+            pm.loadFromData(qr_png(self.server.url, scale=5))
+        return pm
+
+    @property
+    def url(self) -> str:
+        return self.server.url if self.server else ""
+
+    def set_state(self, **kw):
+        if self.server:
+            self.server.set_state(**kw)
+
+    def stop(self):
+        if self.server:
+            self.server.stop()
+            self.server = None
 
 
 class PhoneDialog(QDialog):

@@ -31,7 +31,7 @@ def _spin():
 class CheckPrintDialog(QDialog):
     """Проверочная сетка: какую сторону печатать — выбирает человек, по одной кнопке на сторону."""
 
-    def __init__(self, parent, printer: str, ps: PageSettings, print_fn, error_cls):
+    def __init__(self, parent, printer: str, ps: PageSettings, print_fn, error_cls, profile=None):
         super().__init__(parent)
         self.setWindowTitle("Проверочная сетка")
         self.setMinimumWidth(460)
@@ -47,9 +47,10 @@ class CheckPrintDialog(QDialog):
         hint.setWordWrap(True)
         hint.setProperty("role", "muted")
         lay.addWidget(hint)
-        for side, title, sub in ((Side.FRONT, "Лицевая сторона", "лист отверстиями влево"),
-                                 (Side.BACK, "Оборот", "лист отверстиями вправо")):
-            b = QPushButton(f"{title} — {sub}")
+        profile = profile or printers.PrinterProfile(printer)
+        for side, title in ((Side.FRONT, "Лицевая сторона"), (Side.BACK, "Оборот")):
+            holes = "влево" if profile.holes_left(side is Side.FRONT) else "вправо"
+            b = QPushButton(f"{title} — лист отверстиями {holes}")
             b.setIcon(theme.icon("printer", theme.current().text, 18))
             b.setMinimumHeight(40)
             b.clicked.connect(lambda _=False, s=side: self._print(s))
@@ -105,11 +106,17 @@ class PrintersPage(QWidget):
         self.calibrate.setProperty("kind", "primary")
         self.calibrate.setIcon(theme.icon("sliders-horizontal", theme.current().accent_text, 18))
         self.calibrate.clicked.connect(self._wizard)
+        self.verify = QPushButton("Пройти проверку")
+        self.verify.setProperty("kind", "primary")
+        self.verify.setIcon(theme.icon("circle-check", theme.current().accent_text, 18))
+        self.verify.setToolTip("Новый лист и фото: программа скажет, точно ли легла печать, и сама доведёт поправки")
+        self.verify.clicked.connect(lambda: self._wizard(verify=True))
         check = QPushButton("Проверочная сетка")
         check.setIcon(theme.icon("grid-3x3", theme.current().text, 18))
         check.setToolTip("Чёрная сетка ляжет на клетку листа — видно, насколько точно настроена печать")
         check.clicked.connect(self._print_check)
         buttons = QHBoxLayout()
+        buttons.addWidget(self.verify)
         buttons.addWidget(self.calibrate)
         buttons.addWidget(check)
         buttons.addStretch(1)
@@ -255,6 +262,7 @@ class PrintersPage(QWidget):
             self.status.setText("Windows не нашла ни одного принтера. Подключите принтер и нажмите "
                                 "«Обновить список». Без принтера можно сохранять тетради в PDF.")
             self.calibrate.setEnabled(False)
+            self.verify.hide()
             return
         p = self._profile(name)
         level, text = p.status()
@@ -264,12 +272,23 @@ class PrintersPage(QWidget):
         self.pill.setProperty("role", f"pill_{level}")
         self.pill.style().unpolish(self.pill)
         self.pill.style().polish(self.pill)
+        can_verify = level == "warn" and p.direct_calibrated
         hint = {"ok": "Можно печатать конспекты: строки лягут в клетку.",
-                "warn": "Лучше пройти мастер калибровки по фото — он сам всё измерит и проверит.",
+                "warn": ("Пройдите проверку: один новый лист и фото — программа скажет, точно ли легла печать, "
+                         "и сама доведёт поправки." if can_verify else
+                         "Лучше пройти мастер калибровки по фото — он сам всё измерит и проверит."),
                 "none": "Пройдите мастер калибровки: понадобится один лист из блока и телефон."}[level]
         self.status.setText(hint if level == "none" else text[0].upper() + text[1:] + ".<br>" + hint)
         self.calibrate.setEnabled(name in self._installed)
-        self.calibrate.setText("Откалибровать заново" if level == "ok" else "Откалибровать")
+        self.calibrate.setText("Откалибровать заново" if p.direct_calibrated else "Откалибровать")
+        # главная кнопка — то, что сейчас нужнее: проверка, если калибровка есть, но не подтверждена
+        self.verify.setVisible(can_verify)
+        self.verify.setEnabled(name in self._installed)
+        self.calibrate.setProperty("kind", "" if can_verify else "primary")
+        self.calibrate.setIcon(theme.icon("sliders-horizontal", theme.current().text if can_verify
+                                          else theme.current().accent_text, 18))
+        self.calibrate.style().unpolish(self.calibrate)
+        self.calibrate.style().polish(self.calibrate)
         front, back = p.offsets(self.method.currentData())
         self.f_dx.setValue(front.dx_mm)
         self.f_dy.setValue(front.dy_mm)
@@ -291,13 +310,15 @@ class PrintersPage(QWidget):
         self._fill()
         self.profiles_changed.emit()
 
-    def _wizard(self):
+    def _wizard(self, verify: bool = False):
         from .calibration_wizard import CalibrationWizard
         name = self._name()
         if not name or name not in self._installed:
             QMessageBox.information(self, "Калибровка", "Выберите подключённый принтер.")
             return
-        if CalibrationWizard(name, self).exec():
+        w = CalibrationWizard(name, self, verify=verify)
+        w.exec()
+        if w.saved or w.checks_done:  # поправки могли сохраниться, даже если окно закрыли крестиком
             self._fill()
             self.profiles_changed.emit()
 
@@ -309,7 +330,7 @@ class PrintersPage(QWidget):
             return
         front, back = self._profile(name).offsets(printers.DIRECT)
         ps = PageSettings(offset_front=front, offset_back=back)
-        CheckPrintDialog(self, name, ps, print_check_grid, PrintError).exec()
+        CheckPrintDialog(self, name, ps, print_check_grid, PrintError, self._profile(name)).exec()
 
     def _open_pdfs(self):
         name = self._name() or ""

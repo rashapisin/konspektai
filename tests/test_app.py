@@ -221,6 +221,55 @@ def test_calibration_check_by_photo(qt_app, window, tmp_path):
     assert w.again.isHidden() and "завершена" in w.verdict_title.text()
     w.close()
 
+    # большой промах и на второй проверке: «завершена» не пишем, точность не записываем, проверить можно ещё
+    w = CalibrationWizard("Проверка-принтер")
+    w._start("photo")
+    w.saved = True
+    run_check((1.0, 0.8))
+    run_check((2.4, -0.6))
+    prof = printers.load()["Проверка-принтер"]
+    assert not w.again.isHidden() and "завершена" not in w.verdict_title.text()
+    assert "направляющие" in w.verdict.text()
+    assert prof.direct_check_mm < 0 and prof.status()[0] == "warn"
+    w.close()
+
+
+def test_printer_status_is_honest():
+    """«Настроен точно» — только если проверка по фото показала маленький промах."""
+    from stv.engine import printers
+    from stv.engine.settings import PrinterOffset
+    p = printers.PrinterProfile("X")
+    p.set_offsets(printers.DIRECT, PrinterOffset(), PrinterOffset(), how="photo", check_mm=5.0)
+    level, text = p.status()
+    assert level == "warn" and "5,0" in text
+    p.set_offsets(printers.DIRECT, PrinterOffset(), PrinterOffset(), how="photo", check_mm=0.2)
+    assert p.status()[0] == "ok"
+
+
+def test_verify_only_and_wrong_side(qt_app, window, tmp_path):
+    """«Пройти проверку» сразу открывает проверку; печать не на той стороне — подсказка меняется и
+    запоминается для принтера."""
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_calib_photo import fake_photo
+    from stv.app.calibration_wizard import CalibrationWizard, PhotoStep
+    from stv.engine import printers
+    from stv.engine.calibration import check_lines
+    from stv.engine.paper import Side
+    w = CalibrationWizard("Обратный-принтер", verify=True)
+    assert w.verify_from == 1 and w.stack.currentIndex() == 1 and "отверстиями влево" in w.load_views[0][1].text()
+    step = w.checks[Side.FRONT]
+    assert isinstance(step, PhotoStep)
+    f = tmp_path / "wrong.jpg"
+    fake_photo(f, Side.FRONT, w._page().offset(Side.FRONT), (0.3, 0.2), lines=check_lines, dashed=True,
+               title=True, face=Side.BACK)
+    step.analyze(str(f))
+    assert _wait(qt_app, lambda: "отверстиями вправо" in step.status.text(), 30), step.status.text()
+    assert step.result is None and step.phone_stage == "error"
+    assert printers.load()["Обратный-принтер"].flip_feed
+    assert "отверстиями вправо" in w.load_views[0][1].text() and not w.load_views[0][2].holes_left
+    w.close()
+
 
 def test_first_notebook_follows_study_mode(qt_app, window):
     """Первая тетрадь создаётся до выбора режима — у студента в ней не должно быть шапки МЧС."""
