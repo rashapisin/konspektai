@@ -110,3 +110,12 @@ def test_photo_without_markers_is_rejected(tmp_path):
     cv2.imencode(".jpg", np.full((800, 600, 3), 255, np.uint8))[1].tofile(str(f))
     with pytest.raises(ScanError):
         scan_image(f)
+
+
+def test_blank_template_has_no_ink(tmp_path, qt_app):
+    """Подписи и рамки напечатаны тёмными, линии внутри — голубыми: на пустом листе ни одна не считается буквой."""
+    for page in range(T.page_count()):
+        f = tmp_path / f"пустой {page + 1}.jpg"
+        _filled_page(page, f, seed=7 + page, skip=tuple({c.char for c in T.cells()}))
+        res = scan_image(f)
+        assert res.page == page and not res.glyphs, [g.char for g in res.glyphs][:10]

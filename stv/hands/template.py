@@ -14,13 +14,22 @@ CODE_SIZE = 5.0
 CODE_X = (70.0, 82.0, 94.0, 106.0, 118.0)       # первый квадрат всегда залит, остальные — номер листа
 CODE_Y = 15.0
 
-GRID_X, GRID_Y = 21.0, 36.0
-CELL_W, CELL_H = 14.0, 18.0
+GRID_X, GRID_Y = 21.0, 38.0
+CELL_W, CELL_H = 14.0, 18.0                      # шаг клеток: подпись сверху + квадрат для буквы
 COLS, ROWS = 12, 13
-LABEL_H = 4.0                                    # полоска с подписью буквы сверху клетки
+LABEL_H = 4.5                                    # над квадратом — крупная подпись: какую букву писать
+BOX_GAP = 1.2                                    # просвет между соседними квадратами
 BASELINE = 13.0                                  # базовая линия от верха клетки
 XHEIGHT_GUIDE = 4.5                              # подсказка высоты строчных над базовой линией
-INSET = 0.9                                      # отступ от рамки клетки при вырезании
+INSET = 0.9                                      # отступ от рамки квадрата при вырезании: рамку не берём
+
+# Всё напечатанное внутри квадрата — светлее порога «чернил» распознавания (scanner._ink_mask):
+# голубые линии видны хорошо, но программа их отбрасывает. Подпись и рамка — снаружи вырезаемой части,
+# поэтому их можно печатать тёмными.
+INK_LABEL = "#1a1a1a"
+INK_FRAME = "#3f6fc4"
+INK_BASELINE = "#9fc0ef"
+INK_XHEIGHT = "#b9d1f5"
 
 LOWER = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
 UPPER = LOWER.upper()
@@ -44,6 +53,11 @@ class Cell:
     @property
     def y(self) -> float:
         return GRID_Y + self.row * CELL_H
+
+    @property
+    def box(self) -> tuple[float, float, float, float]:
+        """Квадрат, в котором пишут букву: x, y, ширина, высота (мм)."""
+        return self.x + BOX_GAP / 2, self.y + LABEL_H, CELL_W - BOX_GAP, CELL_H - LABEL_H
 
 
 def cells() -> list[Cell]:
@@ -127,21 +141,25 @@ def draw_page(p, page: int):
         else:
             p.setPen(QPen(QColor("#b0b0b0"), 0.2))
             p.drawRect(r)
-    text(GRID_X, 23.5, 3.2, f"KonspektAI · образец почерка · лист {page + 1} из {n_pages}", bold=True)
-    text(GRID_X, 27.6, 2.5, "Пишите тёмной ручкой, как обычно пишете конспект. Каждая буква — в своей клетке,",
-         "#333333")
-    text(GRID_X, 31.0, 2.5, "на сплошной линии; пунктир — высота строчных. Не касайтесь рамки и квадратов.",
-         "#333333")
-    guide = QPen(QColor("#c4c4c4"), 0.25)
-    dotted = QPen(QColor("#d0d0d0"), 0.2, Qt.DashLine)
+    text(GRID_X, 23.0, 4.2, f"KonspektAI · образец почерка · лист {page + 1} из {n_pages}", bold=True)
+    text(GRID_X, 28.6, 3.0, "Пишите тёмной ручкой (чёрной или синей), как обычно пишете конспект. Каждая буква —",
+         "#111111")
+    text(GRID_X, 32.4, 3.0, "в своём квадрате, на синей линии; пунктир — высота строчных. Не выходите за рамку.",
+         "#111111")
+    frame = QPen(QColor(INK_FRAME), 0.35)
+    frame.setJoinStyle(Qt.MiterJoin)
+    base = QPen(QColor(INK_BASELINE), 0.3)
+    dashed = QPen(QColor(INK_XHEIGHT), 0.25, Qt.DashLine)
     for c in (c for c in all_cells if c.page == page):
-        p.setPen(QPen(QColor("#d8d8d8"), 0.25))
-        p.drawRect(QRectF(c.x, c.y, CELL_W, CELL_H))
-        p.setPen(guide)
-        p.drawLine(QPointF(c.x + 1, c.y + BASELINE), QPointF(c.x + CELL_W - 1, c.y + BASELINE))
-        p.setPen(dotted)
-        p.drawLine(QPointF(c.x + 1, c.y + BASELINE - XHEIGHT_GUIDE),
-                   QPointF(c.x + CELL_W - 1, c.y + BASELINE - XHEIGHT_GUIDE))
+        bx, by, bw, bh = c.box
+        p.setPen(base)
+        p.drawLine(QPointF(bx + 0.8, c.y + BASELINE), QPointF(bx + bw - 0.8, c.y + BASELINE))
+        p.setPen(dashed)
+        p.drawLine(QPointF(bx + 0.8, c.y + BASELINE - XHEIGHT_GUIDE),
+                   QPointF(bx + bw - 0.8, c.y + BASELINE - XHEIGHT_GUIDE))
+        p.setPen(frame)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(bx, by, bw, bh), 1.2, 1.2)
         label = c.char if c.char != " " else "␣"
-        text(c.x + 0.8, c.y + 0.4, 2.4, label, "#9a9a9a")
+        text(bx + bw / 2, c.y + 0.6, 3.3, label, INK_LABEL, bold=True, align=Qt.AlignHCenter)
     p.restore()

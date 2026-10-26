@@ -120,7 +120,7 @@ def _read_page_number(gray: np.ndarray) -> int:
 
 
 def _ink_mask(crop: np.ndarray) -> np.ndarray:
-    """Чернила: заметно темнее бумаги. Серые линии-подсказки светлее порога и отбрасываются."""
+    """Чернила: заметно темнее бумаги. Голубые линии-подсказки светлее порога и отбрасываются."""
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
     paper = float(np.percentile(gray, 90))
     thr = min(paper * 0.62, paper - 55)
@@ -182,10 +182,10 @@ def scan_image(path) -> PageResult:
         raise ScanError(f"Лист с номером {page + 1} не из этого шаблона.")
     ins = T.INSET
     for c in cells:
-        x0, x1 = (c.x + ins) * PX, (c.x + T.CELL_W - ins) * PX
-        # полоску с серой подписью не отрезаем: её отсеет проверка тёмной «сердцевины»,
-        # а высокие хвосты букв (б, в, д) не обрежутся
-        y0, y1 = (c.y + ins) * PX, (c.y + T.CELL_H - ins) * PX
+        # только внутри квадрата: подпись над ним и рамка — тёмная печать, не чернила
+        bx, by, bw, bh = c.box
+        x0, x1 = (bx + ins) * PX, (bx + bw - ins) * PX
+        y0, y1 = (by + ins) * PX, (by + bh - ins) * PX
         crop = flat[int(y0):int(y1), int(x0):int(x1)]
         mask = _ink_mask(crop)
         v = _vectorize(mask, (c.y + T.BASELINE) * PX - y0)
