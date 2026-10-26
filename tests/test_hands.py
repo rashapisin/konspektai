@@ -119,3 +119,16 @@ def test_blank_template_has_no_ink(tmp_path, qt_app):
         _filled_page(page, f, seed=7 + page, skip=tuple({c.char for c in T.cells()}))
         res = scan_image(f)
         assert res.page == page and not res.glyphs, [g.char for g in res.glyphs][:10]
+
+
+def test_clean_render_finds_markers(tmp_path, qt_app):
+    """Как самопроверка EXE: чистый шаблон без фото. Рамки квадратов для букв — тоже квадраты, но светлые
+    внутри: за угловые метки их принимать нельзя."""
+    from PySide6.QtGui import QImage
+    img = T.render_page_image(0, 6.0).convertToFormat(QImage.Format_RGB888)
+    arr = np.frombuffer(img.constBits(), np.uint8).reshape(img.height(), img.bytesPerLine())
+    arr = arr[:, :img.width() * 3].reshape(img.height(), img.width(), 3)
+    f = tmp_path / "шаблон.png"
+    cv2.imencode(".png", arr)[1].tofile(str(f))
+    res = scan_image(f)
+    assert res.page == 0 and not res.glyphs and len(res.empty) > 100

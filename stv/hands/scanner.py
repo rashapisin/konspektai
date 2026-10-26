@@ -58,6 +58,7 @@ def _find_markers(gray: np.ndarray) -> np.ndarray:
     _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(bw, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     area_img = small.shape[0] * small.shape[1]
+    paper = float(np.percentile(blur, 90))
     cands = []
     for c in contours:
         a = cv2.contourArea(c)
@@ -67,6 +68,11 @@ def _find_markers(gray: np.ndarray) -> np.ndarray:
         if min(rw, rh) == 0 or not (0.7 < rw / rh < 1.43):
             continue
         if a / (rw * rh) < 0.8:  # почти сплошной квадрат
+            continue
+        # и тёмный внутри: у рамок квадратов для букв внутренний контур тоже квадратный, но там белая бумага
+        r = max(1, int(min(rw, rh) * 0.3))
+        core = blur[max(0, int(cy) - r):int(cy) + r + 1, max(0, int(cx) - r):int(cx) + r + 1]
+        if core.size == 0 or float(core.mean()) > 0.5 * paper:
             continue
         cands.append((cx, cy, a))
     if len(cands) < 4:
