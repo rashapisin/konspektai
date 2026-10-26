@@ -51,6 +51,7 @@ class UpdateRow(QWidget):
         super().__init__()
         self.rel = None
         self.worker = None
+        self.browser = False  # проверка не прошла — кнопка открывает страницу загрузки в браузере
         self.info = QLabel(f"Версия {VERSION}")
         self.info.setWordWrap(True)
         self.btn = QPushButton("Проверить обновления")
@@ -85,7 +86,14 @@ class UpdateRow(QWidget):
 
     def _click(self):
         from ..brand import portable_root
-        if self.rel is not None and updater.is_newer(self.rel) and portable_root() is not None:
+        if self.browser:
+            # программа до GitHub не достучалась, а браузер на работе обычно ходит через прокси — пусть скачает он
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(self.rel.page if self.rel and self.rel.page else updater.releases_page()))
+            self.info.setText("Скачайте файл KonspektAI-Setup-….exe и запустите его: он поставит новую версию "
+                              "поверх старой, тетради и настройки сохранятся.")
+        elif self.rel is not None and updater.is_newer(self.rel) and portable_root() is not None:
             # переносную версию установщик не обновит: открываем релиз, там новый ZIP
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
@@ -117,6 +125,9 @@ class UpdateRow(QWidget):
         self.btn.setEnabled(True)
         self.bar.hide()
         self.info.setText(f"<span style='color:{theme.current().danger}'>{msg}</span>")
+        self.browser = True
+        self.btn.setText("Скачать в браузере")
+        self.btn.setIcon(theme.icon("download", theme.current().text, 18))
 
     def _download(self):
         self.btn.setEnabled(False)

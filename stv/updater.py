@@ -25,6 +25,35 @@ class UpdateError(Exception):
     pass
 
 
+RELEASES = "https://github.com/{repo}/releases/latest"
+PROXY_TEXT = ("Сеть пускает в интернет только через прокси с паролем (так бывает на работе) — программа так не умеет. "
+              "Скачайте обновление в браузере.")
+
+
+def network_reason(e: BaseException) -> str:
+    """Почему не дошли до GitHub — понятными словами. На рабочих компьютерах браузер часто ходит через
+    прокси или проверку соединений, а программа напрямую: тогда браузер работает, а программа — нет."""
+    import socket
+    import ssl
+    r = getattr(e, "reason", e)
+    if isinstance(r, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(r):
+        return ("Сеть подменяет защищённое соединение с GitHub (проверка трафика на работе или антивирус), "
+                "поэтому программа ему не доверяет. Скачайте обновление в браузере.")
+    if isinstance(r, socket.gaierror):
+        return ("Не удалось найти github.com: нет интернета или сеть закрывает GitHub. "
+                "Если в браузере GitHub открывается — скачайте обновление там.")
+    if isinstance(r, (TimeoutError, socket.timeout)) or "timed out" in str(r):
+        return ("GitHub не ответил вовремя: на работе сеть часто пускает в интернет только браузер (через прокси). "
+                "Скачайте обновление в браузере.")
+    if isinstance(r, ConnectionError):
+        return "Сеть оборвала соединение с GitHub (так бывает за рабочим прокси). Скачайте обновление в браузере."
+    return f"Нет связи с GitHub ({r}). Скачайте обновление в браузере."
+
+
+def releases_page() -> str:
+    return RELEASES.format(repo=repo())
+
+
 @dataclass
 class Release:
     version: str
@@ -63,9 +92,14 @@ def latest(timeout: float = 8.0) -> Release | None:
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
+        if e.code == 407:
+            raise UpdateError(PROXY_TEXT) from None
+        if e.code == 403:
+            raise UpdateError("GitHub временно не отвечает программе (лимит запросов или запрет в сети). "
+                              "Скачайте обновление в браузере.") from None
         raise UpdateError(f"GitHub ответил ошибкой {e.code}") from None
     except (OSError, ValueError) as e:
-        raise UpdateError("Нет связи с GitHub. Проверьте интернет.") from e
+        raise UpdateError(network_reason(e)) from e
     for a in data.get("assets", []):
         name, url = a.get("name", ""), a.get("browser_download_url", "")
         if name.lower().endswith(".exe") and "setup" in name.lower() and url.startswith(TRUSTED):

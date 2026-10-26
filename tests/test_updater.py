@@ -90,3 +90,24 @@ def test_portable_keeps_data_next_to_exe(tmp_path, monkeypatch):
     (exe.parent / brand.PORTABLE_MARK).write_text("x", encoding="utf-8")
     assert brand.data_dir() == exe.parent / "Данные" / "Настройки"
     assert project.documents_dir() == exe.parent / "Данные" / "Тетради"
+
+
+def test_network_failure_is_explained(monkeypatch):
+    """На рабочем компьютере браузер ходит через прокси, а программа напрямую: вместо «нет связи» — причина
+    и совет скачать в браузере."""
+    import socket
+    import ssl
+    import urllib.error
+
+    import pytest
+    for reason, words in ((ssl.SSLCertVerificationError(1, "CERTIFICATE_VERIFY_FAILED"), "подменяет"),
+                          (socket.gaierror(11001, "getaddrinfo failed"), "github.com"),
+                          (TimeoutError("timed out"), "прокси"),
+                          (ConnectionResetError(10054, "reset"), "оборвала")):
+        def get(url, timeout, r=reason):
+            raise urllib.error.URLError(r)
+        monkeypatch.setattr(updater, "_get", get)
+        with pytest.raises(updater.UpdateError, match=words) as e:
+            updater.latest()
+        assert "в браузере" in str(e.value)
+    assert updater.releases_page().endswith("/releases/latest")
