@@ -129,10 +129,11 @@ class PhoneUpload:
                     self._send(404, b"not found")
 
             def do_POST(self):
+                # сначала передаём событие программе, потом отвечаем телефону: ответ «ok» значит «программа знает»
                 if self.path == f"/{owner.token}/next":
-                    self._send(200, b"ok")
                     if owner.on_next:
                         owner.on_next()
+                    self._send(200, b"ok")
                     return
                 if self.path != f"/{owner.token}/upload":
                     self._send(404, b"not found")
@@ -150,8 +151,8 @@ class PhoneUpload:
                     path = owner.folder / f"phone_{owner.count}.jpg"
                 path.write_bytes(data)
                 owner._received()
-                self._send(200, b"ok")
                 owner.on_photo(str(path))
+                self._send(200, b"ok")
 
         self.ip = ip or lan_ip()  # ip — для тестов (127.0.0.1: без запроса брандмауэра Windows)
         self.server = ThreadingHTTPServer((self.ip, 0), Handler)
