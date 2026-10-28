@@ -105,6 +105,11 @@ def shorten_prompt(text: str, target_chars: int) -> str:
             f"<<<\n{text.strip()}\n>>>")
 
 
+def shorten(llm, text: str, target_chars: int, topic: str = "") -> str:
+    """Готовый конспект не уместился на страницу даже мелким почерком — сократить до точного объёма."""
+    return clean_answer(llm.complete(shorten_prompt(text, target_chars)), topic)
+
+
 def compress(llm, entry: Entry, source: str, target_chars: int) -> str:
     """Материал → конспект на страницу через нейросеть (llm.complete). Если вышло заметно длиннее —
     ещё один запрос «сократи». Небольшой перебор не страшен: «Уместить на страницу» чуть уменьшит почерк."""

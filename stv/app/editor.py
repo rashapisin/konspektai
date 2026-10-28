@@ -74,6 +74,8 @@ class EditorPanel(QWidget):
         return self.edit.toPlainText()
 
     def set_text(self, text: str):
+        if text == self.edit.toPlainText():
+            return  # тот же текст — не трогаем: курсор и прокрутка остаются на месте
         self.edit.blockSignals(True)
         self.edit.setPlainText(text)
         self.edit.blockSignals(False)

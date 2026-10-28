@@ -112,11 +112,16 @@ class _LineGeom:
                 + self.slope * (x - self.x0))
 
 
-# Слитно пишем только к буквам, которые и в прописях начинаются снизу, от строки. Буквы, которые начинаются
-# сверху или с овала (о, а, с, г, д, б, в…), — с отрыва: иначе «о» превращается в «а», а «г» — в «к».
-JOIN_INTO = set("иййцшщыьъулмнкжхяюзчп")
-# Выходим только из букв, которые заканчиваются внизу справа; из «г», «т», «р», «о»… связка их портит.
-JOIN_FROM = set("аеиймнлкцчшщыьъяжхуд")
+# Слитное письмо, как в прописях: связка выходит из конца буквы внизу справа и входит в следующую там, где
+# с неё начинают писать. В «и», «л», «м»… — снизу, от строки. В овальные и с верхней чертой («а», «о», «с»,
+# «д», «т», «р»…) — сверху: связка поднимается к верху буквы. Войти в «о» снизу нельзя — выйдет «а».
+JOIN_LOW = set("иййцшщыьъулмнкжхяюзчп")
+JOIN_MID = set("её")                     # «е» начинают с середины
+JOIN_TOP = set("аосдфэбвгтр")
+JOIN_INTO = JOIN_LOW | JOIN_MID | JOIN_TOP
+# Выходим только из букв, которые заканчиваются внизу справа; из «г», «т», «р», «о», «с»… связка их портит
+# («с» замыкается в «о»).
+JOIN_FROM = set("аеёиймнлкцчшщыьъяжхуд")
 
 
 def _press_color(color: str, pressure: float) -> str:
@@ -323,15 +328,22 @@ class Typesetter:
             return None
         xh = self.font.x_height * self.k * scale
         exit_pt = _extreme(pa, ya - 0.35 * xh, ya + 0.08 * xh, rightmost=True)
-        entry = _extreme(pb, yb - 0.55 * xh, yb - 0.05 * xh, rightmost=False)  # вход — в нижней половине
+        if cb in JOIN_TOP:
+            band, far = (yb - 1.0 * xh, yb - 0.55 * xh), 0.75  # к верху овала или черты
+        elif cb in JOIN_MID:
+            band, far = (yb - 0.75 * xh, yb - 0.3 * xh), 0.6
+        else:
+            band, far = (yb - 0.55 * xh, yb - 0.05 * xh), 0.5   # снизу, от строки
+        entry = _extreme(pb, *band, rightmost=False)
         if exit_pt is None or entry is None:
             return None
         dx = entry.x() - exit_pt.x()
-        if not 0.03 * xh < dx < 0.5 * xh:  # буквы и так касаются или стоят слишком далеко
+        if not 0.03 * xh < dx < far * xh:  # буквы и так касаются или стоят слишком далеко
             return None
         curve = QPainterPath(exit_pt)
-        curve.cubicTo(QPointF(exit_pt.x() + 0.45 * dx, exit_pt.y() + 0.05 * xh),
-                      QPointF(entry.x() - 0.35 * dx, entry.y() + 0.15 * xh), entry)
+        rise = exit_pt.y() - entry.y()  # насколько связка поднимается (к верху «о» — почти на высоту строчной)
+        curve.cubicTo(QPointF(exit_pt.x() + 0.45 * dx, exit_pt.y() + 0.05 * xh - 0.1 * rise),
+                      QPointF(entry.x() - 0.35 * dx, entry.y() + 0.15 * xh + 0.3 * rise), entry)
         stroker = QPainterPathStroker()
         stroker.setWidth(max(0.1, 0.08 * xh * press))
         stroker.setCapStyle(Qt.RoundCap)

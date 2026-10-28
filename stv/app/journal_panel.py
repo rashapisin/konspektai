@@ -102,10 +102,15 @@ class JournalPanel(QWidget):
         ll.addWidget(self.plans_btn)
 
         # ---------- центр: выбранный конспект ----------
+        # тема — обычное поле ввода с подписью: раньше крупная «плоская» строка выглядела заголовком,
+        # и тему писали в текст конспекта
+        self.topic_label = QLabel("Тема")
+        self.topic_label.setProperty("role", "muted")
         self.topic = QLineEdit()
-        self.topic.setProperty("flat", True)
-        self.topic.setPlaceholderText("Тема конспекта")
+        self.topic.setPlaceholderText("Например: Пожарные автомобили")
+        self.topic.setMinimumHeight(36)
         self.topic.editingFinished.connect(lambda: self.topic.setCursorPosition(0))
+        self.topic.returnPressed.connect(self._topic_enter)
         self.kind = QComboBox()
         for k, v in KINDS.items():  # в списке коротко, чтобы влезало в узкое окно; на листе — полностью
             self.kind.addItem(COMBO_KIND.get(k, v), k)
@@ -154,13 +159,15 @@ class JournalPanel(QWidget):
         self.ai_btn = _icon_button("sparkles", "Нейросеть сожмёт материал в конспект на одну страницу",
                                    "Сжать через AI", "")
         self.ai_btn.clicked.connect(self.ai_compress)
-        self.write_btn = _icon_button("pen-line", "Нейросеть напишет черновик конспекта по теме, без материала. "
-                                      "Может выдумывать — проверьте по учебнику или документам",
-                                      "Написать по теме", "")
+        self.write_btn = _icon_button("sparkles", "Нейросеть напишет конспект по теме на одну страницу. Может "
+                                      "выдумывать — проверьте по учебнику или документам",
+                                      "Написать конспект", "primary")
+        self.write_btn.setMinimumHeight(36)
         self.write_btn.clicked.connect(self.ai_write)
         self._ai_job = None
+        self._fit_ai: dict[str, tuple[int, int]] = {}  # конспект → (сколько раз ещё сокращать, hash текста)
         actions = FlowLayout(spacing=6)  # в узком окне кнопки переносятся, а не обрезаются
-        for b in (self.file_btn, self.ai_btn, self.write_btn, self.prompt_btn, self.paste_btn, self.source_btn):
+        for b in (self.file_btn, self.ai_btn, self.prompt_btn, self.paste_btn, self.source_btn):
             actions.addWidget(b)
         from PySide6.QtGui import QKeySequence, QShortcut
         for seq, fn in ((QKeySequence.Undo, self.undo), (QKeySequence.Redo, self.redo), ("Ctrl+Y", self.redo)):
@@ -172,7 +179,12 @@ class JournalPanel(QWidget):
         el = QVBoxLayout(self.entry_box)
         el.setContentsMargins(14, 12, 14, 12)
         el.setSpacing(8)
-        el.addWidget(self.topic)
+        topic_row = QHBoxLayout()
+        topic_row.setSpacing(8)
+        el.addWidget(self.topic_label)
+        el.addLayout(topic_row)
+        topic_row.addWidget(self.topic, 1)
+        topic_row.addWidget(self.write_btn)
         el.addLayout(meta)
         el.addWidget(self.status)
         el.addLayout(actions)
@@ -197,6 +209,7 @@ class JournalPanel(QWidget):
         col = theme.current().text_muted
         for b in self._icon_buttons:
             b.setIcon(theme.icon(b._icon_name, col, 18))
+        self.write_btn.setIcon(theme.icon(self.write_btn._icon_name, theme.current().accent_text, 18))
 
     def set_mode(self, mode: str, ai_mode: str):
         """Показать только то, что нужно в выбранном режиме."""
@@ -211,7 +224,7 @@ class JournalPanel(QWidget):
         self.ai_btn.setVisible(ai_mode == "api")
         self.write_btn.setVisible(ai_mode == "api")
         self._ai_finished()  # подпись — с названием выбранной нейросети
-        self.topic.setPlaceholderText("Тема конспекта" if mode != "free" else "Название (не печатается)")
+        self.topic_label.setText("Тема" if mode != "free" else "Название (не печатается)")
         self._refresh_list(keep_row=True)
 
     # --- данные ---
@@ -241,6 +254,39 @@ class JournalPanel(QWidget):
                 e.fit_size = r.x_height_mm
         self._refresh_list(keep_row=True)
         self._update_status()
+        self._check_ai_fit()
+
+    def _check_ai_fit(self):
+        """Конспект от нейросети при «Уместить на страницу» не влез даже мелким почерком — просим её сократить
+        до объёма, который точно помещается (по числу строк на странице), не больше двух раз. Объём заранее
+        оценивается по числу знаков и бывает неточен: здесь — по настоящей вёрстке."""
+        from ..ai import shorten
+        for eid, (left, h) in list(self._fit_ai.items()):
+            e = next((x for x in self.entries if x.id == eid), None)
+            r = self.results.get(eid)
+            if e is None or not e.fit or not e.write or hash(e.text) != h:
+                self._fit_ai.pop(eid)  # текст правили руками или «уместить» сняли — не вмешиваемся
+                continue
+            if r is None or r.text_hash != h:
+                continue  # вёрстка нового текста ещё не готова
+            if not r.overflow_rows or left <= 0 or r.rows <= 0:
+                self._fit_ai.pop(eid)
+                continue
+            if self._ai_job is not None and self._ai_job.isRunning():
+                continue
+            target = int(len(e.text) * r.rows / (r.rows + r.overflow_rows) * 0.92)
+            self._fit_ai.pop(eid)
+            self._run_ai(e, "сокращение до страницы",
+                         lambda llm, limit, t=e.text, n=target, tp=e.topic: (shorten(llm, t, n, tp), None),
+                         fit_tries=left - 1, busy="сокращает до страницы…")
+
+    def _topic_enter(self):
+        """Enter в теме: если текста ещё нет — сразу писать конспект, иначе — к тексту."""
+        e = self.current()
+        if e is not None and not e.text.strip() and self.ai_mode == "api" and self.write_btn.isEnabled():
+            self.ai_write()
+        else:
+            self.editor.edit.setFocus()
 
     # --- список ---
 
@@ -292,9 +338,11 @@ class JournalPanel(QWidget):
             w = self._item_widget(title, meta, state)
             it.setSizeHint(QSize(0, max(54, w.sizeHint().height() + 6)))  # две строки и воздух
             self.list.setItemWidget(it, w)
-        self.list.blockSignals(False)
         if keep_row and 0 <= row < len(self.entries):
+            # тот же конспект: выделение возвращаем молча — иначе он «выбирается» заново, текст в поле
+            # перезагружается, курсор прыгает в начало (буквы шли задом наперёд), предпросмотр — на 1-ю страницу
             self.list.setCurrentRow(row)
+        self.list.blockSignals(False)
 
     def _on_select(self, row: int):
         e = self.current()
@@ -630,8 +678,9 @@ class JournalPanel(QWidget):
             return
         self._run_ai(e, "конспект по теме", lambda llm, limit: write_from_topic(llm, e, limit))
 
-    def _run_ai(self, e: Entry, what: str, fn):
-        """fn(нейросеть, объём) → (текст, источники или None) в фоне; результат — в конспект, с отменой."""
+    def _run_ai(self, e: Entry, what: str, fn, fit_tries: int = 2, busy: str = "пишет конспект…"):
+        """fn(нейросеть, объём) → (текст, источники или None) в фоне; результат — в конспект, с отменой.
+        fit_tries — сколько раз ещё можно попросить сократить, если с «Уместить на страницу» не влезет."""
         from PySide6.QtWidgets import QMessageBox
         from .ai_ui import Job, client, provider_name
         if self._ai_job is not None and self._ai_job.isRunning():
@@ -644,7 +693,8 @@ class JournalPanel(QWidget):
         limit = int(self.capacity_fn() * 0.8)  # с запасом: нейросети пишут чуть длиннее, чем просят
         for b in (self.ai_btn, self.write_btn):
             b.setEnabled(False)
-        self.ai_btn.setText(f"{provider_name()} пишет конспект…")
+        self.ai_btn.setText(f"{provider_name()} {busy}")
+        self.write_btn.setText(f"{provider_name()} {busy}")
         entry_id = e.id
 
         def done(result):
@@ -663,6 +713,8 @@ class JournalPanel(QWidget):
                                  f"{sources or 'не назвала'}")
             elif not target.source.strip():
                 target.source = target.text  # «Исходник» вернёт прежний текст
+            if target.fit:
+                self._fit_ai[entry_id] = (fit_tries, hash(text))  # проверим по вёрстке, влезло ли
             if target is self.current():
                 self._replace_text(target, text, checkpoint=False)
             else:
@@ -687,6 +739,9 @@ class JournalPanel(QWidget):
         for b in (self.ai_btn, self.write_btn):
             b.setEnabled(True)
         self.ai_btn.setText(f"Сжать через {provider_name()}")
+        self.write_btn.setText("Написать конспект")
+        self.write_btn.setToolTip(f"{provider_name()} напишет конспект по теме на одну страницу. Может "
+                                  "выдумывать — проверьте по учебнику или документам")
 
     def paste_answer(self):
         from PySide6.QtGui import QGuiApplication

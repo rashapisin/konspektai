@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 APP_NAME = "KonspektAI"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 TAGLINE = "Рукописные конспекты из печатного текста"
 FILE_EXT = ".konspekt"
 OLD_FILE_EXT = ".stv"  # тетради, сохранённые до переименования, открываются как раньше

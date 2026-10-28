@@ -78,8 +78,10 @@ def test_unchanged_pages_are_not_redrawn(qt_app, window):
     pv.show_page(0)
     first = pv.images[0]
     j.list.setCurrentRow(len(j.entries) - 1)
+    old = pv.doc
     j.editor.edit.setPlainText(j.editor.text() + " ещё слово")
-    assert _wait(qt_app, lambda: pv.is_current() and pv.images and pv.images[0] is None)
+    # новая вёрстка готова; первая страница (другой конспект) — та же готовая картинка, не перерисована
+    assert _wait(qt_app, lambda: pv.doc is not old and pv.is_current() and pv.images)
     pv.show_page(0)
     assert pv.images[0] is first
 
@@ -365,3 +367,79 @@ def test_write_from_topic_keeps_sources_out_of_notebook(qt_app, window, monkeypa
     j.ai_write()
     assert _wait(qt_app, lambda: e.text.startswith("Пётр"), 10)
     assert "ИСТОЧНИКИ" not in e.text and "Учебник истории" in e.source
+
+
+def test_typing_keeps_cursor_and_order(qt_app, window):
+    """Набор в поле конспекта: буквы идут по порядку, курсор не прыгает в начало, предпросмотр не уходит
+    на первую страницу конспекта после каждой буквы."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    def type_text(w, text):  # QTest.keyClicks не умеет кириллицу
+        for ch in text:
+            QApplication.sendEvent(w, QKeyEvent(QEvent.KeyPress, 0, Qt.NoModifier, ch))
+            qt_app.processEvents()
+    j = window.work.journal
+    j.add_entry()
+    ed = j.editor.edit
+    ed.setFocus()
+    type_text(ed, "Тема вторая")
+    qt_app.processEvents()
+    first = j.editor.text()
+    jumps = []
+    j.selected.connect(jumps.append)
+    type_text(ed, " ок")
+    qt_app.processEvents()
+    text = j.editor.text()
+    _wait(qt_app, lambda: window.work.preview.is_current() and window.work.preview.images, 30)
+    assert first == "Тема вторая" and text == "Тема вторая ок" and not jumps, (first, text, jumps)
+
+
+def test_ai_note_is_shortened_until_it_fits(qt_app, window, monkeypatch):
+    """«Уместить на страницу»: нейросеть написала длиннее, чем помещается даже мелким почерком (оценка по знакам
+    ошиблась) — программа по вёрстке просит сократить до точного объёма, и конспект встаёт на одну страницу."""
+    import re
+    from stv.app import ai_ui
+    asked = []
+    sentence = "Пожарный автомобиль доставляет к месту пожара личный состав, воду и пожарно-техническое вооружение. "
+
+    class Fake:
+        def complete(self, prompt, temperature=0.3):
+            m = re.search(r"Сократи этот конспект до (\d+)", prompt)
+            if m:
+                asked.append(int(m.group(1)))
+                return (sentence * 60)[:int(m.group(1))].rsplit(" ", 1)[0] + "."
+            return (sentence * 60).strip() + "\nИСТОЧНИКИ:\n- нет"
+    monkeypatch.setattr(ai_ui, "client", lambda: Fake())
+    j = window.work.journal
+    j.set_mode("mchs", "api")
+    j.add_entry()
+    j.topic.setText("Пожарные автомобили")
+    j._edited()
+    e = j.current()
+    assert e.fit
+    monkeypatch.setattr(j, "capacity_fn", lambda: 8000)  # оценка по знакам сильно ошиблась
+    j.ai_write()
+    assert _wait(qt_app, lambda: asked and e.id in j.results and not j.results[e.id].overflow_rows
+                 and j.results[e.id].text_hash == hash(e.text) and not j._fit_ai, 60), (asked, j.status.text())
+    assert j.results[e.id].pages == 1 and len(e.text) < len(sentence * 60)
+
+
+def test_topic_is_a_clear_field_with_write_button(qt_app, window, monkeypatch):
+    """Тема — поле с подписью, «Написать конспект» рядом; Enter в пустом конспекте сразу пишет."""
+    from stv.app import ai_ui
+
+    class Fake:
+        def complete(self, prompt, temperature=0.3):
+            return "Пожарные автомобили делятся на основные и специальные.\nИСТОЧНИКИ:\n- нет"
+    monkeypatch.setattr(ai_ui, "client", lambda: Fake())
+    j = window.work.journal
+    j.set_mode("mchs", "api")
+    j.add_entry()
+    assert j.topic_label.text() == "Тема" and j.write_btn.parent() is j.topic.parent()
+    j.topic.setText("Пожарные автомобили")
+    j._edited()
+    e = j.current()
+    j.topic.returnPressed.emit()
+    assert _wait(qt_app, lambda: e.text.startswith("Пожарные автомобили делятся"), 10)

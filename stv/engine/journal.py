@@ -90,6 +90,8 @@ class EntryResult:
     fill: float          # заполненность последней страницы, 0..1
     overflow_rows: int   # сколько строк ушло за первую страницу
     x_height_mm: float   # с каким размером букв свёрстан
+    rows: int = 0        # сколько строк занято на первой странице
+    text_hash: int = 0   # для какого текста посчитано: ответ вёрстки мог прийти по старому тексту
 
 
 def _typeset_entry(markup: str, ps: PageSettings, hs: HandSettings, start: int) -> Document:
@@ -173,7 +175,7 @@ def build(entries: list[Entry], ps: PageSettings, hs: HandSettings,
         pages.extend(doc_pages)
         warnings.extend(f"«{e.title()}»: {w}" for w in doc.warnings)
         results.append(EntryResult(e.id, start, len(doc_pages), doc_pages[-1].fill, overflow,
-                                   doc.hand.x_height_mm or base_x_height))
+                                   doc.hand.x_height_mm or base_x_height, doc_pages[0].rows_used, hash(e.text)))
     if not pages:
         pages = typeset("", ps, hs).pages
     return Document(pages, ps, hs, warnings), results
