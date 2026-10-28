@@ -46,6 +46,8 @@ def prefs() -> dict:
 class AppSettingsPage(QWidget):
     prefs_changed = Signal()
     onboarding_requested = Signal()
+    export_requested = Signal()
+    import_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -87,6 +89,27 @@ class AppSettingsPage(QWidget):
         self.ai_label = QLabel("Нейросеть")
         form.addRow(self.ai_label, self.ai_settings)
         form.addRow("Папка тетрадей", folder)
+        # перенос: дома подготовили — на работе загрузили и печатаете из программы
+        pack_out = QPushButton("Сохранить всё в файл…")
+        pack_out.setToolTip("Калибровки принтеров, свои почерки, настройки и тетради — в один файл: "
+                            "перенесите его на флешке или отправьте себе")
+        pack_out.clicked.connect(self.export_requested.emit)
+        pack_in = QPushButton("Загрузить из файла…")
+        pack_in.setToolTip("Загрузить файл переноса с другого компьютера")
+        pack_in.clicked.connect(self.import_requested.emit)
+        pack_row = QHBoxLayout()
+        pack_row.addWidget(pack_out)
+        pack_row.addWidget(pack_in)
+        pack_row.addStretch(1)
+        pack_box = QVBoxLayout()
+        pack_box.setSpacing(6)
+        pack_box.addLayout(pack_row)
+        pack_hint = QLabel("Принтеры, свои почерки, настройки и тетради одним файлом — чтобы продолжить на другом "
+                           "компьютере. Ключ нейросети не переносится: там его нужно ввести заново.")
+        pack_hint.setWordWrap(True)
+        pack_hint.setProperty("role", "muted")
+        pack_box.addWidget(pack_hint)
+        form.addRow("Перенос на другой компьютер", pack_box)
         from .update_ui import UpdateRow
         self.updates = UpdateRow()
         form.addRow("Обновления", self.updates)
@@ -110,6 +133,9 @@ class AppSettingsPage(QWidget):
             c.blockSignals(True)
             c.setCurrentIndex(max(0, c.findData(p[key])))
             c.blockSignals(False)
+        self.theme.blockSignals(True)
+        self.theme.setCurrentText(AppSettings.get("theme", THEMES[0]))
+        self.theme.blockSignals(False)
 
     def _set(self, key, value):
         AppSettings.set(key, value)
@@ -290,6 +316,8 @@ class MainWindow(QMainWindow):
         self.hands.hand_saved.connect(self._hand_saved)
         self.app_settings.prefs_changed.connect(self.apply_prefs)
         self.app_settings.onboarding_requested.connect(self.show_onboarding)
+        self.app_settings.export_requested.connect(self.export_pack)
+        self.app_settings.import_requested.connect(lambda: self.import_pack())
 
         self.addAction(QAction(self, shortcut=QKeySequence.Save, triggered=self.save))
 
@@ -405,6 +433,97 @@ class MainWindow(QMainWindow):
             self._switch_to(Project.load(path))
         except (OSError, ValueError) as e:
             QMessageBox.warning(self, "Открытие", f"Не удалось открыть файл: {e}")
+
+    # --- перенос на другой компьютер ---
+
+    def export_pack(self):
+        from ..brand import PACK_EXT
+        from ..transfer import TransferError, export_pack
+        self.save()  # в файл — то, что сейчас на экране
+        current = self.project.path
+        others = [p for p in sorted(documents_dir().glob(f"*{FILE_EXT}")) if str(p) != current]
+        box = QMessageBox(self)
+        box.setWindowTitle("Перенос на другой компьютер")
+        box.setText("Калибровки принтеров, свои почерки и настройки сохранятся в один файл. Какие тетради "
+                    "положить вместе с ними?")
+        b_cur = box.addButton("Открытую тетрадь", QMessageBox.AcceptRole) if current else None
+        b_all = box.addButton(f"Все тетради ({len(others) + (1 if current else 0)})", QMessageBox.AcceptRole) \
+            if others else None
+        b_none = box.addButton("Без тетрадей", QMessageBox.AcceptRole)
+        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setDefaultButton(b_cur or b_all or b_none)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_cur and b_cur is not None:
+            notebooks = [current]
+        elif clicked is b_all and b_all is not None:
+            notebooks = ([current] if current else []) + [str(p) for p in others]
+        elif clicked is b_none:
+            notebooks = []
+        else:
+            return
+        import datetime as dt
+        start = Path.home() / "Desktop"
+        name = f"{APP_NAME} — перенос {dt.date.today().strftime('%d.%m.%y')}{PACK_EXT}"
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить файл переноса",
+                                              str((start if start.is_dir() else documents_dir()) / name),
+                                              f"Перенос {APP_NAME} (*{PACK_EXT})")
+        if not path:
+            return
+        if not path.lower().endswith(PACK_EXT):
+            path += PACK_EXT
+        try:
+            got = export_pack(path, notebooks)
+        except (OSError, TransferError) as e:
+            QMessageBox.warning(self, "Перенос", f"Не удалось сохранить файл: {e}")
+            return
+        QMessageBox.information(self, "Перенос", f"Сохранено в «{Path(path).name}»: {got.describe()}.\n\n"
+                                "На другом компьютере установите KonspektAI и откройте этот файл двойным щелчком "
+                                "или через «Настройки» → «Загрузить из файла».")
+
+    def import_pack(self, path: str | None = None):
+        from ..brand import PACK_EXT
+        from ..transfer import TransferError, import_pack, read_pack
+        if path is None:
+            start = Path.home() / "Desktop"
+            path, _ = QFileDialog.getOpenFileName(self, "Загрузить файл переноса",
+                                                  str(start if start.is_dir() else documents_dir()),
+                                                  f"Перенос {APP_NAME} (*{PACK_EXT})")
+            if not path:
+                return
+        try:
+            info = read_pack(path)
+        except TransferError as e:
+            QMessageBox.warning(self, "Перенос", str(e))
+            return
+        when = f" от {info.created}" if info.created else ""
+        if QMessageBox.question(self, "Перенос", f"Загрузить файл переноса{when}?\n\nВнутри: {info.describe()}.\n\n"
+                                "Принтеры и почерки с теми же именами обновятся. Тетради, которые здесь уже есть и "
+                                "отличаются, сохранятся рядом под новым именем — ничего не пропадёт.") \
+                != QMessageBox.Yes:
+            return
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self.save()
+        try:
+            got = import_pack(path, documents_dir())
+        except (OSError, TransferError) as e:
+            QMessageBox.warning(self, "Перенос", f"Не удалось загрузить: {e}")
+            return
+        # всё, что пришло, — сразу в программу
+        self.work.settings.reload_fonts()
+        self._printers_changed()
+        self.apply_prefs()
+        apply_theme(AppSettings.get("theme", THEMES[0]))
+        self.app_settings.refresh()
+        if hasattr(self.app_settings, "ai_settings"):
+            self.app_settings.ai_settings._refresh()
+        self.home.refresh()
+        if got.notebooks:
+            self.open_path(got.notebooks[0])
+        QMessageBox.information(self, "Перенос", f"Загружено: {got.describe()}."
+                                + ("\n\nОткрыта тетрадь «" + Path(got.notebooks[0]).stem + "»; остальные — на "
+                                   "главной в «Недавних»." if len(got.notebooks) > 1 else ""))
 
     def import_txt(self):
         from ..documents import read_any

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGraphicsDr
 
 from stv.app.ui import theme
 from stv.app.ui.motion import AnimatedStack, _anim, fade_in
-from stv.brand import APP_NAME, FILE_EXT, TAGLINE, VERSION, data_dir
+from stv.brand import APP_NAME, FILE_EXT, PACK_EXT, TAGLINE, VERSION, data_dir
 from stv.resources import asset
 
 EXE = f"{APP_NAME}.exe"
@@ -42,6 +42,7 @@ UNINSTALL_EXE = "Uninstall.exe"
 MARKER = ".konspektai"  # метка «это папка KonspektAI»: удаляется только папка, где она есть
 UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_NAME}"
 PROG_ID = f"{APP_NAME}.Notebook"
+PACK_ID = f"{APP_NAME}.Pack"  # файл переноса на другой компьютер
 CLASSES = r"Software\Classes"
 
 PHRASES = ("Раскладываю листы…", "Точу карандаши…", "Разлиновываю клетку…", "Заправляю ручку чернилами…",
@@ -130,18 +131,23 @@ def register(dest: Path, size_kb: int, associate: bool):
         _set(rf"{CLASSES}\{PROG_ID}", "", f"Тетрадь {APP_NAME}")
         _set(rf"{CLASSES}\{PROG_ID}\DefaultIcon", "", f'"{exe}",0')
         _set(rf"{CLASSES}\{PROG_ID}\shell\open\command", "", f'"{exe}" "%1"')
+        _set(rf"{CLASSES}\{PACK_EXT}", "", PACK_ID)
+        _set(rf"{CLASSES}\{PACK_ID}", "", f"Перенос {APP_NAME}")
+        _set(rf"{CLASSES}\{PACK_ID}\DefaultIcon", "", f'"{exe}",0')
+        _set(rf"{CLASSES}\{PACK_ID}\shell\open\command", "", f'"{exe}" "%1"')
 
 
 def unregister():
     _delete_tree(UNINSTALL_KEY)
-    _delete_tree(rf"{CLASSES}\{PROG_ID}")
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{CLASSES}\{FILE_EXT}") as k:
-            ours = winreg.QueryValueEx(k, "")[0] == PROG_ID
-    except OSError:
-        ours = False
-    if ours:  # связь .konspekt удаляем, только если она наша
-        _delete_tree(rf"{CLASSES}\{FILE_EXT}")
+    for ext, pid in ((FILE_EXT, PROG_ID), (PACK_EXT, PACK_ID)):
+        _delete_tree(rf"{CLASSES}\{pid}")
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{CLASSES}\{ext}") as k:
+                ours = winreg.QueryValueEx(k, "")[0] == pid
+        except OSError:
+            ours = False
+        if ours:  # связь расширения удаляем, только если она наша
+            _delete_tree(rf"{CLASSES}\{ext}")
 
 
 def open_payload(path: str | None) -> zipfile.ZipFile | None:

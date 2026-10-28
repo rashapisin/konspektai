@@ -2,6 +2,7 @@
 
 KonspektAI.exe                       — обычный запуск
 KonspektAI.exe <файл.konspekt>       — открыть тетрадь
+KonspektAI.exe <файл.kpack>          — загрузить файл переноса с другого компьютера
 KonspektAI.exe --selftest <папка>    — без окна создать PDF и проверить, что всё упаковано
 """
 
@@ -44,6 +45,9 @@ def main():
     w.show()
     if len(sys.argv) >= 2 and sys.argv[1].lower().endswith((".konspekt", ".stv")):
         w.open_path(sys.argv[1])  # двойной щелчок по файлу тетради
+    elif len(sys.argv) >= 2 and sys.argv[1].lower().endswith(".kpack"):
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(300, lambda: w.import_pack(sys.argv[1]))  # файл переноса — когда окно уже на экране
     sys.exit(app.exec())
 
 

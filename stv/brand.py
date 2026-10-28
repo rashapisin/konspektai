@@ -5,10 +5,11 @@ import shutil
 from pathlib import Path
 
 APP_NAME = "KonspektAI"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 TAGLINE = "Рукописные конспекты из печатного текста"
 FILE_EXT = ".konspekt"
 OLD_FILE_EXT = ".stv"  # тетради, сохранённые до переименования, открываются как раньше
+PACK_EXT = ".kpack"     # перенос на другой компьютер: принтеры, почерки, настройки и тетради
 # Откуда брать обновления: «владелец/репозиторий» на GitHub (релизы с установщиком).
 GITHUB_REPO = "rashapisin/konspektai"
 
