@@ -526,7 +526,7 @@ class JournalPanel(QWidget):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from ..documents import parse_schedule
         from .import_dialog import ScheduleDialog
-        files, _ = QFileDialog.getOpenFileNames(self, "Расписание или план занятий", "", "Документы Word (*.docx)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Расписание занятий", "", "Документы Word (*.docx)")
         if not files:
             return
         lessons = []
@@ -536,12 +536,9 @@ class JournalPanel(QWidget):
             except Exception as ex:
                 QMessageBox.warning(self, "Расписание", f"Не удалось прочитать «{f}»: {ex}")
         if not lessons:
-            QMessageBox.information(self, "Расписание", "В выбранных файлах не нашлось таблицы с занятиями: нужна "
-                                    "таблица с колонкой темы («Тема», «Предмет обучения», «План-задание», "
-                                    "«Содержание»…) или с датами занятий.")
+            QMessageBox.information(self, "Расписание", "В выбранных файлах не нашлось таблицы с датами занятий.")
             return
-        if all(les.date for les in lessons):  # даты не заполнены («__» ____) — оставляем порядок документа
-            lessons.sort(key=lambda les: (les.date[6:], les.date[3:5], les.date[:2]))
+        lessons.sort(key=lambda les: (les.date[6:], les.date[3:5], les.date[:2]))
         dlg = ScheduleDialog(lessons, self)
         if not dlg.exec():
             return
@@ -560,21 +557,17 @@ class JournalPanel(QWidget):
 
     def attach_plans(self):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication
-        from ..documents import match_plan, parse_plans
+        from ..documents import match_plan, parse_plan
         files, _ = QFileDialog.getOpenFileNames(self, "Планы-конспекты", "",
                                                 "Word, PDF, сканы (*.docx *.doc *.pdf *.jpg *.jpeg *.png *.webp)")
         if not files:
             return
         plans, bad = [], []
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         for f in files:
             try:
-                plans += [p for p in parse_plans(f) if p.text.strip()]  # в одном файле бывает несколько материалов
+                plans.append(parse_plan(f))
             except Exception:
                 bad.append(f)
-        QApplication.restoreOverrideCursor()
         self._checkpoint("планы-конспекты")
         used, matched = set(), 0
         for e in self.entries:
@@ -586,49 +579,24 @@ class JournalPanel(QWidget):
             if not e.text.strip():
                 e.text = p.text
             matched += 1
-        rest = [p for p in plans if id(p) not in used]
-        added = 0
-        if rest and QMessageBox.question(
-                self, "Планы-конспекты", f"Прикреплено к занятиям: {matched}. Для {len(rest)} не нашлось занятия с "
-                "похожей темой:\n" + "\n".join(f"• {p.topic or '(без темы)'}" for p in rest[:12])
-                + ("\n…" if len(rest) > 12 else "") + "\n\nДобавить их в тетрадь отдельными конспектами?") \
-                == QMessageBox.Yes:
-            added = self._add_plans(rest)
-            rest = []
+        unmatched = [p.topic or "(без темы)" for p in plans if id(p) not in used]
         self._on_select(self.list.currentRow())
         self._after_change()
-        msg = f"Прикреплено к занятиям: {matched}." + (f" Добавлено новыми конспектами: {added}." if added else "")
-        if rest:
-            msg += "\n\nНе нашлось занятия с похожей темой:\n" + "\n".join(f"• {p.topic or '(без темы)'}" for p in rest)
+        msg = f"Прикреплено к занятиям: {matched}."
+        if unmatched:
+            msg += "\n\nНе нашлось занятия с похожей темой:\n" + "\n".join(f"• {t}" for t in unmatched)
         if bad:
             msg += "\n\nНе удалось прочитать:\n" + "\n".join(bad)
-        if matched or added:
-            msg += ("\n\nЕсли текст длиннее страницы — сожмите его кнопкой «Сжать через …» или «Запрос для AI».")
+        if matched:
+            msg += ("\n\nТекст плана-конспекта длиннее страницы. Нажмите «Запрос для AI», "
+                    "чтобы сжать его в любом чате, затем «Вставить ответ AI».")
         QMessageBox.information(self, "Планы-конспекты", msg)
-
-    def _add_plans(self, plans) -> int:
-        """Материалы — новыми конспектами после текущего (пустой текущий — заполняем первым)."""
-        cur = self.current()
-        kind = cur.kind if cur is not None else MODE_KIND.get(self.mode, "self")
-        new = [Entry(kind=kind, topic=p.topic.rstrip("."), text=p.text, source=p.text) for p in plans]
-        if not new:
-            return 0
-        total = len(new)
-        i = self.list.currentRow()
-        if cur is not None and not cur.text.strip() and not cur.topic.strip():
-            cur.topic, cur.text, cur.source = new[0].topic, new[0].text, new[0].source
-            new = new[1:]
-        self.entries[i + 1:i + 1] = new
-        recompute_dates(self.entries, self.step_days)
-        self._refresh_list()
-        self.list.setCurrentRow(max(0, i))
-        return total
 
     def load_file(self):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
-        from ..documents import parse_plans, read_any
+        from ..documents import parse_plan, read_any
         e = self.current()
         if e is None:
             return
@@ -637,43 +605,19 @@ class JournalPanel(QWidget):
         if not path:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)  # распознавание сканов занимает секунды
-        plans = []
         try:
             text = read_any(path)
-            if not path.lower().endswith(".txt"):
-                # шапку, гриф, титульный лист, оглавление, подписи и пометки «удалить» убираем; в файле может
-                # быть несколько материалов. Если разбор оставил подозрительно мало — берём текст целиком
-                plans = [p for p in parse_plans(path, text) if p.text.strip()]
-                if len(plans) == 1 and len(plans[0].text) < 0.4 * len(text):
-                    plans = []
+            if "учебный вопрос" in text.lower() and not path.lower().endswith(".txt"):
+                plan = parse_plan(path)  # план-конспект: убираем шапку, литературу и подписи
+                text = plan.text
+                if not e.topic.strip():
+                    e.topic = plan.topic
+                    self.topic.setText(plan.topic)
         except Exception as ex:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Файл", f"Не удалось прочитать файл: {ex}")
             return
         QApplication.restoreOverrideCursor()
-        if len(plans) > 1:
-            from PySide6.QtWidgets import QInputDialog
-            every = f"Все {len(plans)} — отдельными конспектами"
-            items = [every] + [f"{n}. {p.topic or '(без темы)'}" for n, p in enumerate(plans, 1)]
-            choice, ok = QInputDialog.getItem(self, "Файл", f"В файле {len(plans)} материала(ов). Что добавить?",
-                                              items, 0, False)
-            if not ok:
-                return
-            if choice == every:
-                self._checkpoint("загрузку файла")
-                n = self._add_plans(plans)
-                self._on_select(self.list.currentRow())
-                self._after_change()
-                toast = getattr(self.window(), "toast", None)
-                if toast is not None:
-                    toast.show_text(f"Добавлено конспектов: {n}")
-                return
-            plans = [plans[items.index(choice) - 1]]
-        if plans:
-            text = plans[0].text
-            if not e.topic.strip() and plans[0].topic:
-                e.topic = plans[0].topic.rstrip(".")
-                self.topic.setText(e.topic)
         if e.text.strip() and QMessageBox.question(self, "Файл", "Заменить текст конспекта текстом из файла?") \
                 != QMessageBox.Yes:
             return
