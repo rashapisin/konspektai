@@ -526,7 +526,7 @@ class JournalPanel(QWidget):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from ..documents import parse_schedule
         from .import_dialog import ScheduleDialog
-        files, _ = QFileDialog.getOpenFileNames(self, "Расписание занятий", "", "Документы Word (*.docx)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Расписание занятий", "", "Документы Word (*.docx *.doc)")
         if not files:
             return
         lessons = []
@@ -542,7 +542,7 @@ class JournalPanel(QWidget):
         dlg = ScheduleDialog(lessons, self)
         if not dlg.exec():
             return
-        new = [Entry(kind=les.kind, date=les.date, date_auto=False, topic=les.topic, write=write)
+        new = [Entry(kind=les.kind, date=les.date, date_auto=False, topic=les.topic, write=write, lesson_no=les.number)
                for les, write in dlg.selection()]
         self._checkpoint("импорт расписания")
         # пустой стартовый конспект заменяем, а не оставляем первым
@@ -571,7 +571,7 @@ class JournalPanel(QWidget):
         self._checkpoint("планы-конспекты")
         used, matched = set(), 0
         for e in self.entries:
-            p = match_plan(e.topic, [p for p in plans if id(p) not in used])
+            p = match_plan(e.topic, [p for p in plans if id(p) not in used], e.lesson_no)
             if p is None:
                 continue
             used.add(id(p))
@@ -607,7 +607,9 @@ class JournalPanel(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)  # распознавание сканов занимает секунды
         try:
             text = read_any(path)
-            if "учебный вопрос" in text.lower() and not path.lower().endswith(".txt"):
+            low = text.lower()
+            if ("учебный вопрос" in low or "план-конспект" in low or "план конспект" in low) \
+                    and not path.lower().endswith(".txt"):
                 plan = parse_plan(path)  # план-конспект: убираем шапку, литературу и подписи
                 text = plan.text
                 if not e.topic.strip():

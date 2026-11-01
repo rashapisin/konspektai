@@ -443,3 +443,40 @@ def test_topic_is_a_clear_field_with_write_button(qt_app, window, monkeypatch):
     e = j.current()
     j.topic.returnPressed.emit()
     assert _wait(qt_app, lambda: e.text.startswith("Пожарные автомобили делятся"), 10)
+
+
+def test_doc_schedule_and_plans_by_number(qt_app, window, monkeypatch):
+    """«Расписание» из .doc (ШОМ): все 5 занятий; «Планы-конспекты»: план «Тема № 9» — к занятию с тем же
+    номером, даже когда формулировки разные."""
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+
+    from stv.app import import_dialog
+    from stv.documents import Lesson
+    fix = Path(__file__).parent / "fixtures"
+    j = window.work.journal
+    j.set_mode("mchs", "chat")
+    before = len(j.entries)
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(fix / "schedule_shom.doc")], ""))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(import_dialog.ScheduleDialog, "exec", lambda self: QDialog.Accepted)
+    j.import_schedule()
+    got = j.entries[-5:]
+    assert len(j.entries) >= before + 4
+    assert [e.topic for e in got] == ["Групповое упражнение (деловая игра): Тушение пожаров в резервуарах.",
+                                          "«Закономерности развития пожара»", "Анализ организации пожаротушения за 2025 год.",
+                                          "«Кодекс чести сотрудника»", "«Предупреждение должностных преступлений»"]
+    assert [e.lesson_no for e in got] == ["", "13", "", "4", "8"]
+
+    # занятие «Тема № 9» с другой формулировкой — план прикрепляется по номеру
+    monkeypatch.setattr(import_dialog.ScheduleDialog, "selection",
+                        lambda self: [(Lesson(date="17.10.26", kind="service", number="9",
+                                              topic="Полномочия органов государственной власти в области пожарной "
+                                                    "безопасности."), True)])
+    j.import_schedule()
+    target = j.entries[-1]
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(fix / "plan_header_table.doc")], ""))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    j.attach_plans()
+    assert target.text.startswith("Учебный вопрос № 1") and "надзора" in target.source
