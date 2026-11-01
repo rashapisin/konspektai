@@ -544,6 +544,8 @@ class JournalPanel(QWidget):
             return
         new = [Entry(kind=les.kind, date=les.date, date_auto=False, topic=les.topic, write=write, lesson_no=les.number)
                for les, write in dlg.selection()]
+        if not new:
+            return  # все занятия — других групп
         self._checkpoint("импорт расписания")
         # пустой стартовый конспект заменяем, а не оставляем первым
         if len(self.entries) == 1 and not self.entries[0].text.strip() and not self.entries[0].topic.strip():

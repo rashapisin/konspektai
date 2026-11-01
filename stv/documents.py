@@ -26,6 +26,23 @@ class Lesson:
     questions: list[str] = field(default_factory=list)
     hours: str = ""
     number: str = ""     # «Тема № 11» → «11»: по номеру план-конспект находится надёжнее, чем по словам
+    group: str = ""      # с какой группой занятие (GROUPS): по шапке расписания «с общей группой…»
+
+
+# Группы из шапки расписания: (как узнать, название, вид подготовки). Общая группа — служебная подготовка,
+# ШОМ (школа оперативного мастерства, тактическая подготовка начальствующего состава) — специальная. Группа
+# обслуживания и учебно-тренировочный полигон — тоже специальная, но это расписания других людей.
+GROUPS = {
+    "general": (re.compile(r"общей\s+групп", re.I), "Общая группа", "service"),
+    "shom": (re.compile(r"\bШОМ\b|оперативного\s+мастерства|тактической\s+подготовк", re.I), "ШОМ", "special"),
+    "maintenance": (re.compile(r"групп\w*\s+обслуживани", re.I), "Группа обслуживания", "special"),
+    "utp": (re.compile(r"учебно-тренировочн\w*\s+полигон|\bУТП\b", re.I), "УТП", "special"),
+}
+
+
+def schedule_group(text: str) -> str:
+    """Группа по строке шапки расписания: «с общей группой начальника…» → «general»; не узнали — «»."""
+    return next((g for g, (rx, _, _) in GROUPS.items() if rx.search(text)), "")
 
 
 # ---------- низкий уровень: DOCX ----------
@@ -109,13 +126,19 @@ def _schedule_items(path):
 
 
 def parse_schedule(path) -> list[Lesson]:
-    kind = "service"
+    kind, group, explicit = "service", "", False
     lessons: list[Lesson] = []
     cols, i_date, i_topic, i_hours, last_date = 0, 0, 0, None, ""  # колонки последней таблицы расписания
     for what, item in _schedule_items(path):
         if what == "p":
-            if "специальной подготовк" in item.lower():
-                kind = "special"
+            low = item.lower()
+            if "специальной подготовк" in low or "служебной подготовк" in low:
+                kind, explicit = ("special" if "специальной" in low else "service"), True  # прямо написано
+            g = schedule_group(item)
+            if g:
+                group = g
+                if not explicit:
+                    kind = GROUPS[g][2]  # ШОМ — специальная, хотя в шапке «по тактической подготовке»
             continue
         rows = item
         if not rows:
@@ -143,8 +166,10 @@ def parse_schedule(path) -> list[Lesson]:
                 date_cell = last_date  # дата объединена на весь день: в следующих строках ячейка пустая
             else:
                 continue
-            lessons += _lessons_from_row(date_cell, r[i_topic], kind,
-                                         r[i_hours] if i_hours is not None and i_hours < len(r) else "")
+            for les in _lessons_from_row(date_cell, r[i_topic], kind,
+                                         r[i_hours] if i_hours is not None and i_hours < len(r) else ""):
+                les.group = group
+                lessons.append(les)
     return lessons
 
 

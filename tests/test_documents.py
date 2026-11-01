@@ -188,3 +188,21 @@ def test_plan_without_header_takes_whole_text(tmp_path):
     p = parse_plan(f)
     assert p.topic == "Деловая игра." and p.text.startswith("I. Оперативно-тактическая")
     assert match_plan("Групповое упражнение (деловая игра): Тушение пожаров в резервуарах.", [p]) is p
+
+
+def test_schedule_group_decides_kind(tmp_path):
+    """Группа из шапки: общая группа — служебная; ШОМ («с группой по тактической подготовке…ШОМ») —
+    специальная, хотя слов «специальной подготовке» в шапке нет (раньше ШОМ записывался служебной)."""
+    from stv.documents import schedule_group
+    assert schedule_group("с общей группой начальника 1 ПСО") == "general"
+    assert schedule_group("с группой по тактической подготовке (начальствующий состав входящий в ШОМ)") == "shom"
+    assert schedule_group("с группой обслуживания 1 ПСО") == "maintenance"
+    assert schedule_group("с учебно-тренировочным полигоном 1 ПСО") == "utp"
+    les = parse_schedule(FIX / "schedule_shom.doc")
+    assert {(l.group, l.kind) for l in les} == {("shom", "special")}
+    f = tmp_path / "общая.docx"
+    _schedule(f)
+    d = docx.Document(f)
+    d.paragraphs[1].text = "с общей группой начальника 1 ПСО"
+    d.save(f)
+    assert {(l.group, l.kind) for l in parse_schedule(f)} == {("general", "service")}

@@ -480,3 +480,22 @@ def test_doc_schedule_and_plans_by_number(qt_app, window, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
     j.attach_plans()
     assert target.text.startswith("Учебный вопрос № 1") and "надзора" in target.source
+
+
+def test_schedule_dialog_hides_other_groups(qt_app, window):
+    """Группа обслуживания и УТП по умолчанию скрыты и не добавляются; выбор групп запоминается."""
+    from stv.app.import_dialog import ScheduleDialog, skipped_groups
+    from stv.app.project import AppSettings
+    from stv.documents import Lesson
+    AppSettings.set("schedule_skip_groups", ["maintenance", "utp"])
+    lessons = [Lesson(date="12.08.26", kind="service", topic="Послание Президента.", group="general"),
+               Lesson(date="13.08.26", kind="special", topic="Деловая игра.", group="shom"),
+               Lesson(date="13.08.26", kind="special", topic="Контроль техники.", group="maintenance")]
+    d = ScheduleDialog(lessons)
+    assert [les.topic for les, _ in d.selection()] == ["Послание Президента.", "Деловая игра."]
+    assert "ещё 1" in d.title.text()
+    d.group_boxes["maintenance"].setChecked(True)  # решили писать и обслуживание
+    assert len(d.selection()) == 3
+    d.accept()
+    assert "maintenance" not in skipped_groups() and "utp" in skipped_groups()
+    AppSettings.set("schedule_skip_groups", ["maintenance", "utp"])
