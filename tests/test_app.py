@@ -443,3 +443,45 @@ def test_topic_is_a_clear_field_with_write_button(qt_app, window, monkeypatch):
     e = j.current()
     j.topic.returnPressed.emit()
     assert _wait(qt_app, lambda: e.text.startswith("Пожарные автомобили делятся"), 10)
+
+
+def test_file_with_several_materials_and_undated_schedule(qt_app, window, tmp_path, monkeypatch):
+    """«Из файла»: сборник из нескольких материалов → «все отдельными конспектами»; «Расписание» по плану без
+    дат — все занятия в порядке документа."""
+    import docx
+    from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
+
+    from stv.app import import_dialog
+    d = docx.Document()
+    for n, (title, body) in enumerate((("Тепло в доме без беды", "С наступлением холодов включают печи."),
+                                       ("Памятка о печах", "Перед сезоном проверьте печь и дымоход.")), 1):
+        d.add_paragraph(f"Материал {n}. Материал")
+        d.add_paragraph(title)
+        d.add_paragraph(body)
+    f = tmp_path / "сборник.docx"
+    d.save(f)
+    j = window.work.journal
+    j.set_mode("mchs", "chat")
+    j.add_entry()
+    before = len(j.entries)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(f), ""))
+    monkeypatch.setattr(QInputDialog, "getItem", lambda parent, title, label, items, *a: (items[0], True))
+    j.load_file()
+    topics = [e.topic for e in j.entries]
+    assert "Тепло в доме без беды" in topics and "Памятка о печах" in topics
+    assert len(j.entries) == before + 1  # пустой текущий конспект заполнен первым материалом
+
+    p = docx.Document()
+    t = p.add_table(rows=3, cols=3)
+    for i, h in enumerate(("№", "Дата", "План-задание на день")):
+        t.rows[0].cells[i].text = h
+    for r, task in ((1, "Изучить: охрану труда"), (2, "Изучить: категории риска")):
+        t.rows[r].cells[1].text = "«__» ______ 2026 г."
+        t.rows[r].cells[2].text = task
+    sched = tmp_path / "план.docx"
+    p.save(sched)
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(sched)], ""))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(import_dialog.ScheduleDialog, "exec", lambda self: QDialog.Accepted)
+    j.import_schedule()
+    assert [e.topic for e in j.entries[-2:]] == ["Охрану труда.", "Категории риска."]

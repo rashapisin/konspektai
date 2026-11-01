@@ -33,7 +33,7 @@ class ScheduleDialog(QDialog):
             chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             chk.setCheckState(Qt.Checked)
             self.table.setItem(i, 0, chk)
-            for j, val in enumerate((les.date, KINDS[les.kind], les.topic), start=1):
+            for j, val in enumerate((les.date or "—", KINDS[les.kind], les.topic), start=1):
                 it = QTableWidgetItem(val)
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if j == 3 and les.questions:
